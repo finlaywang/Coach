@@ -23,7 +23,6 @@ warnings.filterwarnings(
 )
 
 DEFAULT_ENDPOINT = "http://localhost:8080/api/v1/internal/ota/daily-sum"
-DEFAULT_OUTPUT_EXCEL = "ota_daily_summary.xlsx"
 DEFAULT_LARK_WEBHOOK = "https://open.larksuite.com/open-apis/bot/v2/hook/6ebb962d-e817-4b7b-a14c-bb55f53d2413"
 DEFAULT_TIMEOUT_SEC = 10.0
 
@@ -630,6 +629,30 @@ def discover(downloads_dir: str) -> Dict[str, List[str]]:
     }
 
 
+def make_archive_dir(input_dir: str) -> str:
+    base = datetime.now().strftime("%Y%m%d")
+    candidate = os.path.join(input_dir, base)
+    if not os.path.exists(candidate):
+        os.makedirs(candidate)
+        return candidate
+    suffix = 2
+    while True:
+        candidate = os.path.join(input_dir, f"{base}_{suffix}")
+        if not os.path.exists(candidate):
+            os.makedirs(candidate)
+            return candidate
+        suffix += 1
+
+
+def archive_source_files(input_dir: str, files: Dict[str, List[str]]) -> str:
+    archive_dir = make_archive_dir(input_dir)
+    all_paths = [p for paths in files.values() for p in paths]
+    for src in all_paths:
+        dst = os.path.join(archive_dir, os.path.basename(src))
+        os.rename(src, dst)
+    return archive_dir
+
+
 def run(
     input_dir: str,
     endpoint: str,
@@ -689,6 +712,9 @@ def run(
     payloads.sort(key=lambda x: (x["platform"], x["product_pid"], x["departure_date"]))
     persist_items_to_excel(output_excel, payloads)
     output_abs_path = os.path.abspath(output_excel)
+
+    archive_dir = archive_source_files(input_dir, files)
+    print(f"[信息] 源文件已归档至: {archive_dir}")
 
     if verbose:
         by_platform = defaultdict(int)
@@ -759,7 +785,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="OTA daily summary aggregator and reporter")
     parser.add_argument("-i", "--input-dir", default="Downloads", help="input directory for OTA exports")
     parser.add_argument("-e", "--endpoint", default=DEFAULT_ENDPOINT, help="POST endpoint")
-    parser.add_argument("-o", "--output-excel", default=DEFAULT_OUTPUT_EXCEL, help="output excel file for persisted items")
+    parser.add_argument("-o", "--output-excel", default=None, help="output excel file path (default: ota_daily_summary_YYYYMMDD_HHMMSS.xlsx in cwd)")
     parser.add_argument(
         "--post",
         dest="post",
@@ -771,12 +797,17 @@ def main() -> int:
     parser.add_argument("-v", "--verbose", action="store_true", help="print details")
     args = parser.parse_args()
 
+    output_excel = args.output_excel or os.path.join(
+        os.getcwd(),
+        f"ota_daily_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+    )
+
     try:
         return run(
             input_dir=args.input_dir,
             endpoint=args.endpoint,
             verbose=args.verbose,
-            output_excel=args.output_excel,
+            output_excel=output_excel,
             enable_post=args.post,
             post_batch_size=args.post_batch_size,
         )
