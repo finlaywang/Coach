@@ -24,7 +24,7 @@ warnings.filterwarnings(
 
 DEFAULT_ENDPOINT = "http://localhost:8080/api/v1/internal/ota/daily-sum"
 DEFAULT_LARK_WEBHOOK = "https://open.larksuite.com/open-apis/bot/v2/hook/6ebb962d-e817-4b7b-a14c-bb55f53d2413"
-DEFAULT_TIMEOUT_SEC = 10.0
+DEFAULT_TIMEOUT_SEC = 60.0
 
 
 @dataclass
@@ -37,7 +37,7 @@ class RowRecord:
     lang_code: Optional[str]
 
 
-FEATURED_MEAL_KEYWORDS = ("特色早餐", "特色午餐", "特色晚餐", "鍋", "御膳", "特色料理", "宴")
+FEATURED_MEAL_KEYWORDS = ("特色早餐", "特色午餐", "特色晚餐", "鍋", "御膳", "特色料理", "含午餐", "宴")
 
 
 def resolve_klook_activity_file(downloads_dir: str) -> Optional[str]:
@@ -74,7 +74,7 @@ def extract_date_yyyy_mm_dd(value) -> Optional[str]:
     m = re.search(r"(\d{4}-\d{2}-\d{2})", text)
     if m:
         return m.group(1)
-    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
@@ -109,11 +109,22 @@ def parse_lang_from_text(text: str, mapping: List[Tuple[str, str]]) -> Optional[
     return None
 
 
-KKDAY_SPEC_INCLUDE_TOKENS = ("餐食", "早餐", "午餐", "晚餐", "御膳", "料理", "宴")
+KKDAY_SPEC_INCLUDE_TOKENS = ("餐食", "早餐", "午餐", "晚餐", "御膳", "鍋", "料理", "宴")
 KKDAY_SPEC_ADDON_TOKENS = ("鍋", "料理", "宴", "餐")
 
 DEFAULT_TITLE_MEAL_TOKENS = ("餐", "套餐", "餐食", "早餐", "午餐", "晚餐", "鍋", "宴", "御膳", "料理")
 TRIP_TITLE_MEAL_TOKENS = ("餐", "餐食", "早餐", "午餐", "晚餐", "宴", "鍋", "御膳")
+
+KKDAY_PRIVATE_PLAN_OVERRIDES: Dict[str, List[str]] = {
+    "25703": [
+        "中文導覽服務｜河口湖・新倉山淺間公園・忍野八海・大石公園｜銀座出發",
+        "富士山五合目&忍野八海&富士全景纜車｜新宿出發",
+    ],
+    "155289": [
+        "天橋立三景一日遊｜天橋立&伊根灣遊船&美山茅屋之里｜大阪出發",
+        "天橋立海之京都一日遊｜伊根灣遊船・伊根舟屋・天橋立｜大阪/京都出發",
+    ],
+}
 
 
 def kkday_meal_from_specs(spec_text: str) -> Optional[bool]:
@@ -155,27 +166,12 @@ def title_meal_signal(
     return None
 
 
-def title_meal_common(
-    title: str,
-    include_tokens=("含",),
-    extra_negative_tokens: Tuple[str, ...] = (),
-    meal_tokens: Tuple[str, ...] = DEFAULT_TITLE_MEAL_TOKENS,
-    colon_shortcut: bool = True,
-) -> bool:
-    return title_meal_signal(
-        title,
-        include_tokens=include_tokens,
-        extra_negative_tokens=extra_negative_tokens,
-        meal_tokens=meal_tokens,
-        colon_shortcut=colon_shortcut,
-    ) is True
-
 
 def find_trip_header_row(raw_df: pd.DataFrame) -> int:
     limit = min(len(raw_df), 30)
     for i in range(limit):
         row_text = "|".join(raw_df.iloc[i].fillna("").astype(str).tolist())
-        if "產品 ID" in row_text and "使用日期" in row_text:
+        if ("產品 ID" in row_text or "产品 ID" in row_text) and "使用日期" in row_text:
             return i
     raise ValueError("Trip file header row not found")
 
@@ -200,13 +196,13 @@ def parse_kkday(files: List[str], platform: str) -> List[RowRecord]:
     ]
     for f in files:
         df = pd.read_csv(f)
-        pid_col = pick_col(df, ["商品编号", "商品編號"])
+        pid_col = pick_col(df, ["商品編號", "商品编号"])
         date_col = pick_col(df, ["開始日期", "开始日期"])
-        cnt_col = pick_col(df, ["订购总数", "訂購總數"])
+        cnt_col = pick_col(df, ["訂購總數", "订购总数"])
         status_col = pick_col(df, ["訂單狀態", "订单状态"])
-        pkg_col = pick_col(df, ["套餐名称", "套餐名稱"])
-        product_col = pick_col(df, ["商品名称", "商品名稱"])
-        spec_cols = [c for c in ["规格一", "规格二", "规格三", "規格一", "規格二", "規格三"] if c in df.columns]
+        pkg_col = pick_col(df, ["套餐名稱", "套餐名称"])
+        product_col = pick_col(df, ["商品名稱", "商品名称"])
+        spec_cols = [c for c in ["規格一", "規格二", "規格三", "规格一", "规格二", "规格三"] if c in df.columns]
         if not (pid_col and date_col and cnt_col and pkg_col):
             continue
 
@@ -221,6 +217,9 @@ def parse_kkday(files: List[str], platform: str) -> List[RowRecord]:
             spec_text = " | ".join(norm_text(row.get(c)) for c in spec_cols if norm_text(row.get(c)))
             package_title = norm_text(row.get(pkg_col))
             product_title = norm_text(row.get(product_col)) if product_col else ""
+            if platform == "kkday_private" and pid in KKDAY_PRIVATE_PLAN_OVERRIDES:
+                sp2_plans = KKDAY_PRIVATE_PLAN_OVERRIDES[pid]
+                pid += "-sp2" if any(p in package_title for p in sp2_plans) else "-sp1"
 
             meal_by_spec = kkday_meal_from_specs(spec_text)
             if meal_by_spec is not None:
@@ -375,7 +374,7 @@ def parse_trip(files: List[str]) -> List[RowRecord]:
         df = raw.iloc[header_row + 1 :].copy()
         df.columns = header
 
-        pid_col = pick_col(df, ["產品 ID", "产品 ID", "产品ID", "產品ID"])
+        pid_col = pick_col(df, ["產品 ID", "产品 ID", "產品ID", "产品ID"])
         date_col = pick_col(df, ["使用日期"])
         cnt_col = pick_col(df, ["資源旅客訂單數量", "资源旅客订单数量"])
         plan_col = pick_col(df, ["套餐名稱", "套餐名称"])
@@ -393,12 +392,12 @@ def parse_trip(files: List[str]) -> List[RowRecord]:
             if not pid or not dep or cnt <= 0:
                 continue
 
-            has_meal = title_meal_common(
+            has_meal = title_meal_signal(
                 plan,
                 include_tokens=("含", "包括"),
                 meal_tokens=TRIP_TITLE_MEAL_TOKENS,
                 colon_shortcut=False,
-            )
+            ) is True
             lang_code = parse_lang_from_text(plan, lang_map)
 
             out.append(
@@ -622,10 +621,10 @@ def discover(downloads_dir: str) -> Dict[str, List[str]]:
     return {
         "kkday": kkday_files,
         "kkday_private": kkday_private_files,
-        "klook": sorted(glob.glob(os.path.join(downloads_dir, "bookinglist_-_*.xlsx"))),
-        "klook_activities": sorted(glob.glob(os.path.join(downloads_dir, "klook_activities*.xlsx"))),
-        "gyg": sorted(glob.glob(os.path.join(downloads_dir, "bookings-export*.xlsx"))),
-        "trip": sorted(glob.glob(os.path.join(downloads_dir, "*ClientOrder*.xlsx"))),
+        "klook": sorted(p for p in glob.glob(os.path.join(downloads_dir, "bookinglist_-_*.xlsx")) if not os.path.basename(p).startswith("~$")),
+        "klook_activities": sorted(p for p in glob.glob(os.path.join(downloads_dir, "klook_activities*.xlsx")) if not os.path.basename(p).startswith("~$")),
+        "gyg": sorted(p for p in glob.glob(os.path.join(downloads_dir, "bookings-export*.xlsx")) if not os.path.basename(p).startswith("~$")),
+        "trip": sorted(p for p in glob.glob(os.path.join(downloads_dir, "*ClientOrder*.xlsx")) if not os.path.basename(p).startswith("~$")),
     }
 
 
@@ -714,9 +713,6 @@ def run(
     persist_items_to_excel(output_excel, payloads)
     output_abs_path = os.path.abspath(output_excel)
 
-    archive_dir = archive_source_files(input_dir, files)
-    print(f"[信息] 源文件已归档至: {archive_dir}")
-
     if verbose:
         by_platform = defaultdict(int)
         for p in payloads:
@@ -759,6 +755,9 @@ def run(
                 ),
                 timeout_sec=DEFAULT_TIMEOUT_SEC,
             )
+        if failed_count == 0:
+            archive_dir = archive_source_files(input_dir, files)
+            print(f"[信息] 源文件已归档至: {archive_dir}")
         print(f"[结果] 已写入={len(payloads)} 已发送={ok_count} 失败={failed_count}")
         print(f"导出文件: file://{output_abs_path}")
     else:

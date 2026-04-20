@@ -3,28 +3,52 @@ from __future__ import annotations
 
 import argparse
 import re
-import secrets
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict
 
 import pandas as pd
 
 
+KKDAY_PRIVATE_ID_REMAP: Dict[str, str] = {
+    "25703": "25703-sp1",
+    "155289": "155289-sp1",
+}
+
+
+GYG_CODE_REMAP: Dict[str, str] = {
+    "121946": "1121942",
+}
+
+KKDAY_PRIVATE_SP2_PATCH: Dict[str, Dict[str, str]] = {
+    "系JP東京富士山五合目1日": {
+        "kkday_private_id": "25703-sp2",
+    },
+    "系JP大阪天橋立伊根1日": {
+        "kkday_private_id": "155289-sp2",
+    },
+}
+
 OUTPUT_COLUMNS = [
-    "lion_id",
+    "serp_title",
     "lion_title",
     "lion_short_title",
     "kkday_id",
-    "kkday_title",
     "kkday_private_id",
-    "kkday_private_title",
     "klook_id",
-    "klook_title",
     "gyg_id",
-    "gyg_title",
     "trip_id",
-    "trip_title",
 ]
+
+COLUMN_RENAME = {
+    "serp_title": "標準團名",
+    "lion_title": "雄獅商品名稱",
+    "lion_short_title": "雄獅商品代號",
+    "kkday_id": "KKday商品ID",
+    "kkday_private_id": "KKday專屬團商品ID",
+    "klook_id": "Klook活動ID",
+    "gyg_id": "GYG Product ID",
+    "trip_id": "Trip產品ID",
+}
 
 
 def normalize_id(value: object) -> str:
@@ -45,78 +69,20 @@ def normalize_text(value: object) -> str:
     return str(value).replace("\u3000", " ").strip()
 
 
-def add_lookup(lookup: Dict[str, str], product_id: object, name: object, aliases: Optional[Iterable[str]] = None) -> None:
-    pid = normalize_id(product_id)
-    title = normalize_text(name)
-    if not pid or not title:
-        return
-    lookup.setdefault(pid, title)
-    if aliases:
-        for alias in aliases:
-            if alias:
-                lookup.setdefault(alias, title)
-
-
-def build_product_lookups(products_dir: Path) -> Dict[str, Dict[str, str]]:
-    lookups = {
-        "kkday": {},
-        "klook": {},
-        "gyg": {},
-        "trip": {},
-    }
-
-    # kkday private and group product lists
-    for pattern in ("kkday-private-*.xlsx", "kkday_group-*.xlsx"):
-        for f in sorted(products_dir.glob(pattern)):
-            df = pd.read_excel(f, sheet_name=0)
-            for _, row in df.iterrows():
-                add_lookup(lookups["kkday"], row.get("id"), row.get("name"))
-
-    # kkday supplier export
-    supplier_file = next(iter(sorted(products_dir.glob("kkday_suppliers_*.xlsx"))), None)
-    if supplier_file:
-        xls = pd.ExcelFile(supplier_file)
-        for sheet in xls.sheet_names:
-            if "商品列表" not in sheet:
-                continue
-            df = pd.read_excel(supplier_file, sheet_name=sheet)
-            for _, row in df.iterrows():
-                add_lookup(lookups["kkday"], row.get("商品平台ID"), row.get("商品名称"))
-
-    klook_file = next(iter(sorted(products_dir.glob("klook-*.xlsx"))), None)
-    if klook_file:
-        df = pd.read_excel(klook_file, sheet_name=0)
-        for _, row in df.iterrows():
-            add_lookup(lookups["klook"], row.get("活动 id"), row.get("活动名称"))
-
-    gyg_file = next(iter(sorted(products_dir.glob("getyourguide-*.xlsx"))), None)
-    if gyg_file:
-        df = pd.read_excel(gyg_file, sheet_name=0)
-        for _, row in df.iterrows():
-            # Prefer explicit product id when available, fall back to reference code.
-            explicit_pid = normalize_id(row.get("产品id"))
-            ref_code = normalize_id(row.get("reference_code"))
-            pid = explicit_pid or ref_code
-            aliases = []
-            if ref_code and ref_code != pid:
-                aliases.append(ref_code)
-            if pid.upper().startswith("T-"):
-                aliases.append(pid[2:])
-            elif pid.isdigit():
-                aliases.append(f"T-{pid}")
-            if ref_code.upper().startswith("T-"):
-                aliases.append(ref_code[2:])
-            elif ref_code.isdigit():
-                aliases.append(f"T-{ref_code}")
-            add_lookup(lookups["gyg"], pid, row.get("name"), aliases=aliases)
-
-    trip_file = next(iter(sorted(products_dir.glob("ctrip-*.xlsx"))), None)
-    if trip_file:
-        df = pd.read_excel(trip_file, sheet_name=0)
-        for _, row in df.iterrows():
-            add_lookup(lookups["trip"], row.get("id"), row.get("名称"))
-
-    return lookups
+def build_lion_title_map(path: Path) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    if not path.exists():
+        return mapping
+    if path.suffix.lower() in (".xlsx", ".xls"):
+        df = pd.read_excel(path, sheet_name=0, dtype=str)
+    else:
+        df = pd.read_csv(path, encoding="utf-8-sig", dtype=str)
+    for _, row in df.iterrows():
+        std = str(row.get("標準團名") or "").strip()
+        title = str(row.get("商品名") or "").strip()
+        if std and title and title != "商品名":
+            mapping[std] = title
+    return mapping
 
 
 def build_gyg_product_id_map(products_dir: Path) -> Dict[str, str]:
@@ -127,10 +93,9 @@ def build_gyg_product_id_map(products_dir: Path) -> Dict[str, str]:
 
     df = pd.read_excel(gyg_file, sheet_name=0)
     for _, row in df.iterrows():
-        explicit_pid = normalize_id(row.get("产品id"))
-        ref_code = normalize_id(row.get("reference_code"))
+        explicit_pid = normalize_id(row.get("Tour ID"))
+        ref_code = normalize_id(row.get("Reference Code"))
 
-        # Canonical product id for GYG export.
         if explicit_pid:
             canonical = explicit_pid
         elif ref_code.upper().startswith("T-") and ref_code[2:].isdigit():
@@ -143,7 +108,9 @@ def build_gyg_product_id_map(products_dir: Path) -> Dict[str, str]:
 
         mapping.setdefault(canonical, canonical)
         if ref_code:
+            # case-insensitive: store both original and lowercase
             mapping.setdefault(ref_code, canonical)
+            mapping.setdefault(ref_code.lower(), canonical)
             if ref_code.upper().startswith("T-") and ref_code[2:].isdigit():
                 mapping.setdefault(ref_code[2:], canonical)
         if explicit_pid:
@@ -152,14 +119,16 @@ def build_gyg_product_id_map(products_dir: Path) -> Dict[str, str]:
     return mapping
 
 
-def choose_title(raw_title: object, product_id: object, platform_lookup: Dict[str, str]) -> str:
-    given = normalize_text(raw_title)
-    if given:
-        return given
-    pid = normalize_id(product_id)
-    if not pid:
-        return ""
-    return platform_lookup.get(pid, "")
+
+def resolve_output_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    i = 1
+    while True:
+        candidate = path.with_stem(f"{path.stem}({i})")
+        if not candidate.exists():
+            return candidate
+        i += 1
 
 
 def main() -> None:
@@ -167,52 +136,52 @@ def main() -> None:
     parser.add_argument("--mapping-file", default="位控表mapping及特殊规则.xlsx")
     parser.add_argument("--sheet", default="團控對齊參考表")
     parser.add_argument("--products-dir", default="products")
+    parser.add_argument("--product-list", default="Coach tour產品一覽及控位表 - 商品列表 のコピー.xlsx")
     parser.add_argument("--output", default="ota-mapping.csv")
     args = parser.parse_args()
 
     mapping_file = Path(args.mapping_file)
     products_dir = Path(args.products_dir)
-    output_file = Path(args.output)
+    output_file = resolve_output_path(Path(args.output))
 
     mapping_df = pd.read_excel(mapping_file, sheet_name=args.sheet)
-    lookups = build_product_lookups(products_dir)
     gyg_pid_map = build_gyg_product_id_map(products_dir)
+    lion_title_map = build_lion_title_map(Path(args.product_list))
 
     rows = []
     for _, row in mapping_df.iterrows():
-        kkday_private_id = normalize_id(row.get("kkday專屬團 商品編號"))
+        kkday_private_raw_id = normalize_id(row.get("kkday專屬團 商品編號"))
+        kkday_private_id = KKDAY_PRIVATE_ID_REMAP.get(kkday_private_raw_id, kkday_private_raw_id)
         kkday_id = normalize_id(row.get("kkday自控團 商品編號"))
         klook_id = normalize_id(row.get("klook 商品編號"))
         gyg_id_raw = normalize_id(row.get("GYG 商品編號"))
-        gyg_id = gyg_pid_map.get(gyg_id_raw, gyg_id_raw)
+        gyg_id = gyg_pid_map.get(gyg_id_raw) or gyg_pid_map.get(gyg_id_raw.lower(), gyg_id_raw)
         if gyg_id.upper().startswith("T-") and gyg_id[2:].isdigit():
             gyg_id = gyg_id[2:]
         lion_short_title = normalize_text(row.get("位控表Sheet名稱"))
-        if lion_short_title == "LION 富士三湖" and gyg_id == "526791":
-            gyg_id = "1068316"
         trip_id = normalize_id(row.get("TRIP 商品編號"))
 
         if not any([kkday_private_id, kkday_id, klook_id, gyg_id, trip_id]):
             continue
 
+        serp_title = normalize_text(row.get("SERP標準團名"))
+        patch = KKDAY_PRIVATE_SP2_PATCH.get(serp_title)
+        if patch:
+            kkday_private_id = patch["kkday_private_id"]
+
         out = {
-            "lion_id": f"L{secrets.token_hex(4)}",
-            "lion_title": normalize_text(row.get("SERP標準團名")),
+            "serp_title": serp_title,
+            "lion_title": lion_title_map.get(serp_title, ""),
             "lion_short_title": lion_short_title,
             "kkday_id": kkday_id,
-            "kkday_title": choose_title(row.get("kkday自控團 商品名稱"), kkday_id, lookups["kkday"]),
             "kkday_private_id": kkday_private_id,
-            "kkday_private_title": choose_title(row.get("kkday專屬團 商品名稱 "), kkday_private_id, lookups["kkday"]),
             "klook_id": klook_id,
-            "klook_title": choose_title(row.get("klook 商品名稱"), klook_id, lookups["klook"]),
             "gyg_id": gyg_id,
-            "gyg_title": choose_title(row.get("GYG商品名稱"), gyg_id, lookups["gyg"]),
             "trip_id": trip_id,
-            "trip_title": choose_title(row.get("TRIP 商品名稱"), trip_id, lookups["trip"]),
         }
         rows.append(out)
 
-    out_df = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
+    out_df = pd.DataFrame(rows, columns=OUTPUT_COLUMNS).rename(columns=COLUMN_RENAME)
     out_df.to_csv(output_file, index=False, encoding="utf-8-sig")
     print(f"Exported {len(out_df)} rows to {output_file}")
 
