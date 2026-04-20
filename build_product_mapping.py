@@ -65,12 +65,12 @@ def build_product_lookups(products_dir: Path) -> Dict[str, Dict[str, str]]:
         "trip": {},
     }
 
-    # kkday dedicated list
-    kkday_file = next(iter(sorted(products_dir.glob("kkday-*.xlsx"))), None)
-    if kkday_file:
-        df = pd.read_excel(kkday_file, sheet_name=0)
-        for _, row in df.iterrows():
-            add_lookup(lookups["kkday"], row.get("id"), row.get("name"))
+    # kkday private and group product lists
+    for pattern in ("kkday-private-*.xlsx", "kkday_group-*.xlsx"):
+        for f in sorted(products_dir.glob(pattern)):
+            df = pd.read_excel(f, sheet_name=0)
+            for _, row in df.iterrows():
+                add_lookup(lookups["kkday"], row.get("id"), row.get("name"))
 
     # kkday supplier export
     supplier_file = next(iter(sorted(products_dir.glob("kkday_suppliers_*.xlsx"))), None)
@@ -187,6 +187,9 @@ def main() -> None:
         gyg_id = gyg_pid_map.get(gyg_id_raw, gyg_id_raw)
         if gyg_id.upper().startswith("T-") and gyg_id[2:].isdigit():
             gyg_id = gyg_id[2:]
+        lion_short_title = normalize_text(row.get("位控表Sheet名稱"))
+        if lion_short_title == "LION 富士三湖" and gyg_id == "526791":
+            gyg_id = "1068316"
         trip_id = normalize_id(row.get("TRIP 商品編號"))
 
         if not any([kkday_private_id, kkday_id, klook_id, gyg_id, trip_id]):
@@ -195,7 +198,7 @@ def main() -> None:
         out = {
             "lion_id": f"L{secrets.token_hex(4)}",
             "lion_title": normalize_text(row.get("SERP標準團名")),
-            "lion_short_title": normalize_text(row.get("位控表Sheet名稱")),
+            "lion_short_title": lion_short_title,
             "kkday_id": kkday_id,
             "kkday_title": choose_title(row.get("kkday自控團 商品名稱"), kkday_id, lookups["kkday"]),
             "kkday_private_id": kkday_private_id,
