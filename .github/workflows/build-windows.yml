@@ -19,10 +19,10 @@ jobs:
         run: pip install pandas openpyxl pyinstaller
 
       - name: Build EXE
-        run: pyinstaller --onefile --name ota_daily_sum ota_daily_sum.py
+        run: pyinstaller --onefile --name ota_daily_report ota_daily_report.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ota_daily_sum-windows
-          path: dist/ota_daily_sum.exe
+          name: ota_daily_report-windows
+          path: dist/ota_daily_report.exe
