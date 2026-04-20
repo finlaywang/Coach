@@ -631,13 +631,14 @@ def discover(downloads_dir: str) -> Dict[str, List[str]]:
 
 def make_archive_dir(input_dir: str) -> str:
     base = datetime.now().strftime("%Y%m%d")
-    candidate = os.path.join(input_dir, base)
+    archive_root = os.path.join(input_dir, "archived")
+    candidate = os.path.join(archive_root, base)
     if not os.path.exists(candidate):
         os.makedirs(candidate)
         return candidate
-    suffix = 2
+    suffix = 1
     while True:
-        candidate = os.path.join(input_dir, f"{base}_{suffix}")
+        candidate = os.path.join(archive_root, f"{base}({suffix})")
         if not os.path.exists(candidate):
             os.makedirs(candidate)
             return candidate
@@ -799,7 +800,7 @@ def main() -> int:
 
     output_excel = args.output_excel or os.path.join(
         os.getcwd(),
-        f"ota_daily_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        f"ota_daily_summary_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
     )
 
     try:
