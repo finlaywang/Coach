@@ -694,6 +694,15 @@ def make_archive_dir(input_dir: str) -> str:
         suffix += 1
 
 
+def clear_input_dir(input_dir: str) -> None:
+    archive_dir = make_archive_dir(input_dir)
+    for name in os.listdir(input_dir):
+        src = os.path.join(input_dir, name)
+        if os.path.isfile(src):
+            os.rename(src, os.path.join(archive_dir, name))
+    print(f"[清空] 已归档旧文件至: {archive_dir}")
+
+
 def archive_source_files(input_dir: str, files: Dict[str, List[str]]) -> str:
     archive_dir = make_archive_dir(input_dir)
     all_paths = [p for k, paths in files.items() if k != "klook_activities" for p in paths]
@@ -856,6 +865,7 @@ def main() -> int:
     )
 
     if args.pad:
+        clear_input_dir(args.input_dir)
         ok, failed = wait_for_pad_flows()
         if not ok:
             send_lark_notification(
