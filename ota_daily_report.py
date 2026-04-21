@@ -695,13 +695,16 @@ def make_archive_dir(input_dir: str) -> str:
 
 
 def clear_input_dir(input_dir: str) -> None:
+    files_to_move = [
+        name for name in os.listdir(input_dir)
+        if not name.lower().startswith("klook_activities")
+        and os.path.isfile(os.path.join(input_dir, name))
+    ]
+    if not files_to_move:
+        return
     archive_dir = make_archive_dir(input_dir)
-    for name in os.listdir(input_dir):
-        if name.lower().startswith("klook_activities"):
-            continue
-        src = os.path.join(input_dir, name)
-        if os.path.isfile(src):
-            os.rename(src, os.path.join(archive_dir, name))
+    for name in files_to_move:
+        os.rename(os.path.join(input_dir, name), os.path.join(archive_dir, name))
     print(f"[清空] 已归档旧文件至: {archive_dir}")
 
 
