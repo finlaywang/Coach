@@ -27,6 +27,7 @@ warnings.filterwarnings(
 DEFAULT_POST_TARGET = "http://localhost:8080/api/v1/internal/ota/daily-sum"
 DEV_POST_TARGET = "http://20.187.191.189/pim/api/v1/internal/ota/daily-sum"
 DEFAULT_LARK_WEBHOOK = "https://open.larksuite.com/open-apis/bot/v2/hook/6ebb962d-e817-4b7b-a14c-bb55f53d2413"
+SUCCESS_LARK_WEBHOOK = "https://open.larksuite.com/open-apis/bot/v2/hook/b5b6a703-9206-40fb-b533-b11451520a22"
 DEFAULT_TIMEOUT_SEC = 60.0
 
 PAD_ENV_ID = "Default-217d672b-4f71-439b-b886-cf526beaa100"
@@ -724,6 +725,7 @@ def run(
     output_excel: str,
     enable_post: bool,
     post_batch_size: int,
+    start_time: Optional[datetime] = None,
 ) -> int:
     files = discover(input_dir)
     kkday_files = files.get("kkday", [])
@@ -828,8 +830,17 @@ def run(
         print("[信息] 当前未启用POST，仅导出Excel；如需启用POST，请添加参数 --post。")
         print(f"[结果] 已写入={len(payloads)} 已跳过发送={len(payloads)} 失败=0")
         print(f"导出文件: file://{output_abs_path}")
+    end_time = datetime.now()
+    elapsed = end_time - (start_time or end_time)
+    elapsed_min = int(elapsed.total_seconds()) // 60
+    elapsed_sec = int(elapsed.total_seconds()) % 60
+    time_str = (
+        f"{start_time.strftime('%H:%M')} 到 {end_time.strftime('%H:%M')}"
+        f"（耗时 {elapsed_min} 分 {elapsed_sec} 秒）"
+        if start_time else f"{end_time.strftime('%H:%M')}"
+    )
     send_lark_notification(
-        DEFAULT_LARK_WEBHOOK,
+        SUCCESS_LARK_WEBHOOK,
         "处理完成",
         (
             f"目录: {os.path.abspath(input_dir)}\n"
@@ -838,7 +849,8 @@ def run(
             f"聚合条目: {len(payloads)}\n"
             f"输出: {output_abs_path}\n"
             f"POST启用: {enable_post}\n"
-            f"POST批大小: {post_batch_size if post_batch_size > 0 else len(payloads)}"
+            f"POST批大小: {post_batch_size if post_batch_size > 0 else len(payloads)}\n"
+            f"运行时间: {time_str}"
         ),
         timeout_sec=DEFAULT_TIMEOUT_SEC,
     )
@@ -869,6 +881,8 @@ def main() -> int:
         f"ota_daily_summary_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
     )
 
+    start_time = datetime.now()
+
     if args.pad:
         clear_input_dir(args.input_dir)
         ok, failed = wait_for_pad_flows()
@@ -890,6 +904,7 @@ def main() -> int:
             output_excel=output_excel,
             enable_post=not args.no_post,
             post_batch_size=args.post_batch_size,
+            start_time=start_time,
         )
     except Exception as e:  # noqa: BLE001
         err_text = f"{type(e).__name__}: {e}"
