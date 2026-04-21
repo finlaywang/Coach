@@ -6,6 +6,8 @@ import glob
 import json
 import os
 import re
+import subprocess
+import time
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass
@@ -26,6 +28,18 @@ DEFAULT_POST_TARGET = "http://localhost:8080/api/v1/internal/ota/daily-sum"
 DEV_POST_TARGET = "http://20.187.191.189/pim/api/v1/internal/ota/daily-sum"
 DEFAULT_LARK_WEBHOOK = "https://open.larksuite.com/open-apis/bot/v2/hook/6ebb962d-e817-4b7b-a14c-bb55f53d2413"
 DEFAULT_TIMEOUT_SEC = 60.0
+
+PAD_ENV_ID = "Default-217d672b-4f71-439b-b886-cf526beaa100"
+PAD_SIGNAL_DIR = r"C:\temp"
+PAD_TIMEOUT_SEC = 1200
+PAD_POLL_INTERVAL = 5
+PAD_FLOWS = [
+    {"name": "kkday",         "flow_id": "d1048b69-0d56-4cf2-8780-a8b76eb74f0d"},
+    {"name": "kkday_private", "flow_id": "a7754e52-7a38-f111-88b4-6045bd1ff239"},
+    {"name": "klook",         "flow_id": "93e77ca5-a3d2-47db-89c5-9e546786527d"},
+    {"name": "gyg",           "flow_id": "68f530f2-886a-4730-b3be-9ea0b1b947d0"},
+    {"name": "trip",          "flow_id": "acf87cd0-6c1e-4bba-bf35-127f4801bfa2"},
+]
 
 
 @dataclass
@@ -609,6 +623,41 @@ def send_lark_notification(webhook: str, title: str, content: str, timeout_sec: 
         return False, f"{type(e).__name__}: {e}"
 
 
+def wait_for_pad_flows() -> Tuple[bool, List[str]]:
+    for f in PAD_FLOWS:
+        path = os.path.join(PAD_SIGNAL_DIR, f"flow_{f['name']}.json")
+        if os.path.exists(path):
+            os.remove(path)
+
+    for f in PAD_FLOWS:
+        url = (
+            f"ms-powerautomate://console/flow/run"
+            f"?environmentid={PAD_ENV_ID}&workflowid={f['flow_id']}&source=Other"
+        )
+        subprocess.Popen(["start", url], shell=True)
+        print(f"[触发] {f['name']}")
+
+        path = os.path.join(PAD_SIGNAL_DIR, f"flow_{f['name']}.json")
+        start = time.time()
+        while time.time() - start < PAD_TIMEOUT_SEC:
+            if os.path.exists(path):
+                try:
+                    with open(path) as fp:
+                        status = json.loads(fp.read()).get("status")
+                except Exception:
+                    status = None
+                if status == "success":
+                    print(f"[完成] {f['name']}")
+                    break
+                else:
+                    return False, [f["name"]]
+            time.sleep(PAD_POLL_INTERVAL)
+        else:
+            return False, [f["name"]]
+
+    return True, []
+
+
 def discover(downloads_dir: str) -> Dict[str, List[str]]:
     all_csv = sorted(glob.glob(os.path.join(downloads_dir, "*.csv")))
     kkday_private_files = [
@@ -784,26 +833,39 @@ def run(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="OTA daily summary aggregator and reporter")
-    parser.add_argument("-i", "--input-dir", default="Downloads", help="input directory for OTA exports")
-    parser.add_argument("--dev", action="store_true", default=False, help=f"use dev endpoint: {DEV_POST_TARGET}")
+    parser.add_argument("-i", "--input-dir", default=r"C:\Users\admin\Downloads", help="input directory for OTA exports")
+    parser.add_argument("--no-dev", action="store_true", default=False, help=f"use prod endpoint instead of dev: {DEFAULT_POST_TARGET}")
     parser.add_argument("-o", "--output-excel", default=None, help="output excel file path (default: ota_daily_summary_YYYYMMDD_HHMMSS.xlsx in cwd)")
     parser.add_argument(
-        "--post",
-        dest="post",
+        "--no-post",
+        dest="no_post",
         action="store_true",
         default=False,
-        help="enable POST (default: disabled, only write excel)",
+        help="disable POST (default: enabled)",
     )
     parser.add_argument("--post-batch-size", type=int, default=200, help="items per POST request; <=0 means all in one request")
     parser.add_argument("-v", "--verbose", action="store_true", help="print details")
+    parser.add_argument("--pad", action="store_true", default=False, help="trigger PAD flows and wait before aggregating")
     args = parser.parse_args()
 
-    endpoint = DEV_POST_TARGET if args.dev else DEFAULT_POST_TARGET
+    endpoint = DEFAULT_POST_TARGET if args.no_dev else DEV_POST_TARGET
 
     output_excel = args.output_excel or os.path.join(
         os.getcwd(),
         f"ota_daily_summary_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
     )
+
+    if args.pad:
+        ok, failed = wait_for_pad_flows()
+        if not ok:
+            send_lark_notification(
+                DEFAULT_LARK_WEBHOOK,
+                "PAD流执行失败",
+                f"失败/超时平台: {', '.join(failed)}",
+                timeout_sec=DEFAULT_TIMEOUT_SEC,
+            )
+            print(f"[错误] PAD流失败: {failed}")
+            return 1
 
     try:
         return run(
@@ -811,7 +873,7 @@ def main() -> int:
             endpoint=endpoint,
             verbose=args.verbose,
             output_excel=output_excel,
-            enable_post=args.post,
+            enable_post=not args.no_post,
             post_batch_size=args.post_batch_size,
         )
     except Exception as e:  # noqa: BLE001
