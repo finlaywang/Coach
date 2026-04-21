@@ -642,7 +642,7 @@ def wait_for_pad_flows() -> Tuple[bool, List[str]]:
         while time.time() - start < PAD_TIMEOUT_SEC:
             if os.path.exists(path):
                 try:
-                    with open(path) as fp:
+                    with open(path, encoding="utf-16") as fp:
                         status = json.loads(fp.read()).get("status")
                 except Exception:
                     status = None
