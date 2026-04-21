@@ -697,6 +697,8 @@ def make_archive_dir(input_dir: str) -> str:
 def clear_input_dir(input_dir: str) -> None:
     archive_dir = make_archive_dir(input_dir)
     for name in os.listdir(input_dir):
+        if name.lower().startswith("klook_activities"):
+            continue
         src = os.path.join(input_dir, name)
         if os.path.isfile(src):
             os.rename(src, os.path.join(archive_dir, name))
