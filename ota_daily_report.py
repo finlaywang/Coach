@@ -865,7 +865,7 @@ def main() -> int:
     endpoint = DEFAULT_POST_TARGET if args.no_dev else DEV_POST_TARGET
 
     output_excel = args.output_excel or os.path.join(
-        os.getcwd(),
+        r"C:\RPA",
         f"ota_daily_summary_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
     )
 
