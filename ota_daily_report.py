@@ -22,7 +22,8 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-DEFAULT_ENDPOINT = "http://localhost:8080/api/v1/internal/ota/daily-sum"
+DEFAULT_POST_TARGET = "http://localhost:8080/api/v1/internal/ota/daily-sum"
+DEV_POST_TARGET = "http://20.187.191.189/pim/api/v1/internal/ota/daily-sum"
 DEFAULT_LARK_WEBHOOK = "https://open.larksuite.com/open-apis/bot/v2/hook/6ebb962d-e817-4b7b-a14c-bb55f53d2413"
 DEFAULT_TIMEOUT_SEC = 60.0
 
@@ -646,7 +647,7 @@ def make_archive_dir(input_dir: str) -> str:
 
 def archive_source_files(input_dir: str, files: Dict[str, List[str]]) -> str:
     archive_dir = make_archive_dir(input_dir)
-    all_paths = [p for paths in files.values() for p in paths]
+    all_paths = [p for k, paths in files.items() if k != "klook_activities" for p in paths]
     for src in all_paths:
         dst = os.path.join(archive_dir, os.path.basename(src))
         os.rename(src, dst)
@@ -784,7 +785,7 @@ def run(
 def main() -> int:
     parser = argparse.ArgumentParser(description="OTA daily summary aggregator and reporter")
     parser.add_argument("-i", "--input-dir", default="Downloads", help="input directory for OTA exports")
-    parser.add_argument("-e", "--endpoint", default=DEFAULT_ENDPOINT, help="POST endpoint")
+    parser.add_argument("--dev", action="store_true", default=False, help=f"use dev endpoint: {DEV_POST_TARGET}")
     parser.add_argument("-o", "--output-excel", default=None, help="output excel file path (default: ota_daily_summary_YYYYMMDD_HHMMSS.xlsx in cwd)")
     parser.add_argument(
         "--post",
@@ -797,6 +798,8 @@ def main() -> int:
     parser.add_argument("-v", "--verbose", action="store_true", help="print details")
     args = parser.parse_args()
 
+    endpoint = DEV_POST_TARGET if args.dev else DEFAULT_POST_TARGET
+
     output_excel = args.output_excel or os.path.join(
         os.getcwd(),
         f"ota_daily_summary_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
@@ -805,7 +808,7 @@ def main() -> int:
     try:
         return run(
             input_dir=args.input_dir,
-            endpoint=args.endpoint,
+            endpoint=endpoint,
             verbose=args.verbose,
             output_excel=output_excel,
             enable_post=args.post,
