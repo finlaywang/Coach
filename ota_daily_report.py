@@ -634,7 +634,7 @@ def wait_for_pad_flows() -> Tuple[bool, List[str]]:
             f"ms-powerautomate://console/flow/run"
             f"?environmentid={PAD_ENV_ID}&workflowid={f['flow_id']}&source=Other"
         )
-        subprocess.Popen(["start", url], shell=True)
+        subprocess.Popen(f'start "" "{url}"', shell=True)
         print(f"[触发] {f['name']}")
 
         path = os.path.join(PAD_SIGNAL_DIR, f"flow_{f['name']}.json")
