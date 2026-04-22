@@ -849,8 +849,8 @@ def run(
             f"聚合条目: {len(payloads)}\n"
             f"输出: {output_abs_path}\n"
             f"POST启用: {enable_post}\n"
-            f"POST批大小: {post_batch_size if post_batch_size > 0 else len(payloads)}\n"
-            f"运行时间: {time_str}"
+            f"运行时间: {time_str}\n"
+            f"查看结果: https://dev-pim.liontravel.global/zh-TW/ota/daily-sum"
         ),
         timeout_sec=DEFAULT_TIMEOUT_SEC,
     )
