@@ -860,7 +860,7 @@ def run(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="OTA daily summary aggregator and reporter")
-    parser.add_argument("-i", "--input-dir", default=r"C:\Users\admin\Downloads", help="input directory for OTA exports")
+    parser.add_argument("-i", "--input-dir", default=os.path.join(os.path.expanduser("~"), "Downloads"), help="input directory for OTA exports")
     parser.add_argument("--no-dev", action="store_true", default=False, help=f"use prod endpoint instead of dev: {DEFAULT_POST_TARGET}")
     parser.add_argument("-o", "--output-excel", default=None, help="output excel file path (default: ota_daily_summary_YYYYMMDD_HHMMSS.xlsx in cwd)")
     parser.add_argument(
