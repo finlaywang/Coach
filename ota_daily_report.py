@@ -31,7 +31,7 @@ SUCCESS_LARK_WEBHOOK = "https://open.larksuite.com/open-apis/bot/v2/hook/b5b6a70
 DEFAULT_TIMEOUT_SEC = 60.0
 
 PAD_ENV_ID = "Default-217d672b-4f71-439b-b886-cf526beaa100"
-PAD_SIGNAL_DIR = r"C:\temp"
+PAD_SIGNAL_DIR = r"C:\RPA\signals"
 PAD_TIMEOUT_SEC = 1200
 PAD_POLL_INTERVAL = 5
 PAD_FLOWS = [
@@ -146,13 +146,13 @@ KKDAY_PRIVATE_PLAN_OVERRIDES: Dict[str, List[str]] = {
 def kkday_meal_from_specs(spec_text: str) -> Optional[bool]:
     if not spec_text:
         return None
+    if any(k in spec_text for k in KKDAY_SPEC_INCLUDE_TOKENS) and "含" in spec_text:
+        return "不" not in spec_text
     if any(k in spec_text for k in KKDAY_SPEC_ADDON_TOKENS):
         if "不加購" in spec_text:
             return False
         if "加購" in spec_text:
             return True
-    if any(k in spec_text for k in KKDAY_SPEC_INCLUDE_TOKENS) and "含" in spec_text:
-        return "不" not in spec_text
     return None
 
 
@@ -625,6 +625,7 @@ def send_lark_notification(webhook: str, title: str, content: str, timeout_sec: 
 
 
 def wait_for_pad_flows() -> Tuple[bool, List[str]]:
+    os.makedirs(PAD_SIGNAL_DIR, exist_ok=True)
     for f in PAD_FLOWS:
         path = os.path.join(PAD_SIGNAL_DIR, f"flow_{f['name']}.json")
         if os.path.exists(path):
