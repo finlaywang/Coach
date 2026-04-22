@@ -133,12 +133,7 @@ TRIP_TITLE_MEAL_TOKENS = ("餐", "餐食", "早餐", "午餐", "晚餐", "宴", 
 
 KKDAY_PRIVATE_PLAN_OVERRIDES: Dict[str, List[str]] = {
     "25703": [
-        "中文導覽服務｜河口湖・新倉山淺間公園・忍野八海・大石公園｜銀座出發",
         "富士山五合目&忍野八海&富士全景纜車｜新宿出發",
-    ],
-    "155289": [
-        "天橋立三景一日遊｜天橋立&伊根灣遊船&美山茅屋之里｜大阪出發",
-        "天橋立海之京都一日遊｜伊根灣遊船・伊根舟屋・天橋立｜大阪/京都出發",
     ],
 }
 
@@ -651,7 +646,7 @@ def wait_for_pad_flows() -> Tuple[bool, List[str]]:
                 if status == "success":
                     print(f"[完成] {f['name']}")
                     break
-                else:
+                elif status is not None:
                     return False, [f["name"]]
             time.sleep(PAD_POLL_INTERVAL)
         else:
