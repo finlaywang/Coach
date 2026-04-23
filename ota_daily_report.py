@@ -835,16 +835,24 @@ def run(
         f"（耗时 {elapsed_min} 分 {elapsed_sec} 秒）"
         if start_time else f"{end_time.strftime('%H:%M')}"
     )
+    rows_by_platform = (
+        f"kkday={sum(1 for r in rows if r.platform == 'kkday')} "
+        f"kkday专属团={sum(1 for r in rows if r.platform == 'kkday_private')} "
+        f"klook={sum(1 for r in rows if r.platform == 'klook')} "
+        f"gyg={sum(1 for r in rows if r.platform == 'gyg')} "
+        f"trip={sum(1 for r in rows if r.platform == 'trip')}"
+    )
+    today = end_time.date()
+    m3 = today.month + 3
+    end_3m = today.replace(year=today.year + (m3 - 1) // 12, month=(m3 - 1) % 12 + 1)
+    date_range_str = f"{today.year}/{today.month}/{today.day} ~ {end_3m.year}/{end_3m.month}/{end_3m.day}"
     send_lark_notification(
         SUCCESS_LARK_WEBHOOK,
         "处理完成",
         (
-            f"目录: {os.path.abspath(input_dir)}\n"
-            f"文件统计: { {k: len(v) for k, v in files.items()} }\n"
-            f"标准化记录: {len(rows)}\n"
+            f"订单记录: {rows_by_platform}\n"
             f"聚合条目: {len(payloads)}\n"
-            f"输出: {output_abs_path}\n"
-            f"POST启用: {enable_post}\n"
+            f"统计时长: {date_range_str}\n"
             f"运行时间: {time_str}\n"
             f"查看结果: https://dev-pim.liontravel.global/zh-TW/ota/daily-sum"
         ),
