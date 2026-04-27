@@ -35,8 +35,10 @@ PAD_SIGNAL_DIR = r"C:\RPA\signals"
 PAD_TIMEOUT_SEC = 1200
 PAD_POLL_INTERVAL = 5
 PAD_FLOWS = [
-    {"name": "kkday",         "flow_id": "d1048b69-0d56-4cf2-8780-a8b76eb74f0d"},
-    {"name": "kkday_private", "flow_id": "a7754e52-7a38-f111-88b4-6045bd1ff239"},
+    {"name": "kkday",                  "flow_id": "d1048b69-0d56-4cf2-8780-a8b76eb74f0d"},
+    {"name": "kkday_private",          "flow_id": "a7754e52-7a38-f111-88b4-6045bd1ff239"},
+    {"name": "kkday_customer",         "flow_id": "362cacd8-b73f-f111-bec6-6045bd1ff239"},
+    {"name": "kkday_customer_private", "flow_id": "ba152c77-fb41-f111-bec6-6045bd1ff239"},
     {"name": "klook",         "flow_id": "93e77ca5-a3d2-47db-89c5-9e546786527d"},
     {"name": "gyg",           "flow_id": "68f530f2-886a-4730-b3be-9ea0b1b947d0"},
     {"name": "trip",          "flow_id": "acf87cd0-6c1e-4bba-bf35-127f4801bfa2"},
@@ -188,24 +190,28 @@ def find_trip_header_row(raw_df: pd.DataFrame) -> int:
     raise ValueError("Trip file header row not found")
 
 
-def parse_kkday(f: str, platform: str) -> List[RowRecord]:
+def build_kkday_lang_map(customer_csv: str) -> Dict[str, str]:
+    try:
+        df = pd.read_csv(customer_csv, header=1, encoding="utf-8-sig", dtype=str)
+    except Exception:
+        return {}
+    order_col = pick_col(df, ["訂單編號", "订单编号"])
+    lang_col = pick_col(df, ["導覽語言", "导览语言"])
+    if not (order_col and lang_col):
+        return {}
+    result: Dict[str, str] = {}
+    for _, row in df.iterrows():
+        oid = norm_text(row.get(order_col))
+        if not oid:
+            continue
+        lang = norm_text(row.get(lang_col))
+        if lang and oid not in result:
+            result[oid] = lang
+    return result
+
+
+def parse_kkday(f: str, platform: str, order_lang: Dict[str, str] = None) -> List[RowRecord]:
     out: List[RowRecord] = []
-    lang_map = [
-        ("英語", "en"),
-        ("英文", "en"),
-        ("日語", "ja"),
-        ("日文", "ja"),
-        ("韓語", "ko"),
-        ("韩语", "ko"),
-        ("韓文", "ko"),
-        ("韩文", "ko"),
-        ("越南語", "vi"),
-        ("越南语", "vi"),
-        ("泰語", "th"),
-        ("泰文", "th"),
-        ("中/日文", "ja"),
-        ("中/日語", "ja"),
-    ]
     df = pd.read_csv(f)
     pid_col = pick_col(df, ["商品編號", "商品编号"])
     date_col = pick_col(df, ["開始日期", "开始日期"])
@@ -213,6 +219,7 @@ def parse_kkday(f: str, platform: str) -> List[RowRecord]:
     status_col = pick_col(df, ["訂單狀態", "订单状态"])
     pkg_col = pick_col(df, ["套餐名稱", "套餐名称"])
     product_col = pick_col(df, ["商品名稱", "商品名称"])
+    order_col = pick_col(df, ["訂單編號", "订单编号"])
     spec_cols = [c for c in ["規格一", "規格二", "規格三", "规格一", "规格二", "规格三"] if c in df.columns]
     if not (pid_col and date_col and cnt_col and pkg_col):
         return out
@@ -242,8 +249,10 @@ def parse_kkday(f: str, platform: str) -> List[RowRecord]:
             else:
                 has_meal = any(k in product_title for k in FEATURED_MEAL_KEYWORDS)
 
-        lang_src = spec_text if spec_text else package_title
-        lang_code = parse_lang_from_text(lang_src, lang_map)
+        oid = norm_text(row.get(order_col)) if order_col else ""
+        lang_code: Optional[str] = order_lang.get(oid) if order_lang else None
+        if order_lang and lang_code is None:
+            print(f"[警告] 导览语言未匹配: 訂單編號={oid or '(空)'} pid={pid}")
 
         out.append(
             RowRecord(
@@ -673,8 +682,10 @@ def discover(downloads_dir: str) -> Dict[str, Optional[str]]:
         return max(candidates, key=os.path.getmtime) if candidates else None
 
     return {
-        "kkday":            latest("kkday_group*.csv"),
-        "kkday_private":    latest("kkday_private*.csv"),
+        "kkday":                    latest("kkday_group*.csv"),
+        "kkday_private":            latest("kkday_private*.csv"),
+        "kkday_customer":           latest("kkday_customer_group*.csv"),
+        "kkday_customer_private":   latest("kkday_customer_private*.csv"),
         "klook":            latest("bookinglist_-_*.xlsx"),
         "klook_activities": latest("klook_activities*.xlsx"),
         "gyg":              latest("bookings-export*.xlsx"),
@@ -737,6 +748,10 @@ def run(
         missing_docs.append("kkday")
     if not files.get("kkday_private"):
         missing_docs.append("kkday_private")
+    if not files.get("kkday_customer"):
+        missing_docs.append("kkday_customer")
+    if not files.get("kkday_customer_private"):
+        missing_docs.append("kkday_customer_private")
     if not files.get("klook"):
         missing_docs.append("klook")
     if not files.get("gyg"):
@@ -784,8 +799,10 @@ def run(
     klook_activity_map = load_klook_activity_map(input_dir)
 
     rows: List[RowRecord] = []
-    rows.extend(parse_kkday(files["kkday"], platform="kkday"))
-    rows.extend(parse_kkday(files["kkday_private"], platform="kkday_private"))
+    kkday_lang = build_kkday_lang_map(files["kkday_customer"])
+    kkday_private_lang = build_kkday_lang_map(files["kkday_customer_private"])
+    rows.extend(parse_kkday(files["kkday"], platform="kkday", order_lang=kkday_lang))
+    rows.extend(parse_kkday(files["kkday_private"], platform="kkday_private", order_lang=kkday_private_lang))
     # 条件2：预检有未映射活动，先刷新映射再解析
     if enable_pad and _has_klook_unknown_activities(files["klook"], klook_activity_map):
         print("[信息] klook 存在未映射活动，触发 PAD 流刷新映射...")
