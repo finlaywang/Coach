@@ -41,6 +41,7 @@ PAD_FLOWS = [
     {"name": "gyg",           "flow_id": "68f530f2-886a-4730-b3be-9ea0b1b947d0"},
     {"name": "trip",          "flow_id": "acf87cd0-6c1e-4bba-bf35-127f4801bfa2"},
 ]
+KLOOK_ACTIVITIES_FLOW = {"name": "klook_activities", "flow_id": "01d20731-e238-f111-88b4-6045bd1ff239"}
 
 
 @dataclass
@@ -187,7 +188,7 @@ def find_trip_header_row(raw_df: pd.DataFrame) -> int:
     raise ValueError("Trip file header row not found")
 
 
-def parse_kkday(files: List[str], platform: str) -> List[RowRecord]:
+def parse_kkday(f: str, platform: str) -> List[RowRecord]:
     out: List[RowRecord] = []
     lang_map = [
         ("英語", "en"),
@@ -205,56 +206,55 @@ def parse_kkday(files: List[str], platform: str) -> List[RowRecord]:
         ("中/日文", "ja"),
         ("中/日語", "ja"),
     ]
-    for f in files:
-        df = pd.read_csv(f)
-        pid_col = pick_col(df, ["商品編號", "商品编号"])
-        date_col = pick_col(df, ["開始日期", "开始日期"])
-        cnt_col = pick_col(df, ["訂購總數", "订购总数"])
-        status_col = pick_col(df, ["訂單狀態", "订单状态"])
-        pkg_col = pick_col(df, ["套餐名稱", "套餐名称"])
-        product_col = pick_col(df, ["商品名稱", "商品名称"])
-        spec_cols = [c for c in ["規格一", "規格二", "規格三", "规格一", "规格二", "规格三"] if c in df.columns]
-        if not (pid_col and date_col and cnt_col and pkg_col):
+    df = pd.read_csv(f)
+    pid_col = pick_col(df, ["商品編號", "商品编号"])
+    date_col = pick_col(df, ["開始日期", "开始日期"])
+    cnt_col = pick_col(df, ["訂購總數", "订购总数"])
+    status_col = pick_col(df, ["訂單狀態", "订单状态"])
+    pkg_col = pick_col(df, ["套餐名稱", "套餐名称"])
+    product_col = pick_col(df, ["商品名稱", "商品名称"])
+    spec_cols = [c for c in ["規格一", "規格二", "規格三", "规格一", "规格二", "规格三"] if c in df.columns]
+    if not (pid_col and date_col and cnt_col and pkg_col):
+        return out
+
+    for _, row in df.iterrows():
+        if status_col and is_cancelled_status(row.get(status_col)):
             continue
+        pid = norm_text(row.get(pid_col))
+        dep = extract_date_yyyy_mm_dd(row.get(date_col))
+        cnt = to_int(row.get(cnt_col))
+        if not pid or not dep or cnt <= 0:
+            continue
+        spec_text = " | ".join(norm_text(row.get(c)) for c in spec_cols if norm_text(row.get(c)))
+        package_title = norm_text(row.get(pkg_col))
+        product_title = norm_text(row.get(product_col)) if product_col else ""
+        if platform == "kkday_private" and pid in KKDAY_PRIVATE_PLAN_OVERRIDES:
+            sp2_plans = KKDAY_PRIVATE_PLAN_OVERRIDES[pid]
+            pid += "-sp2" if any(p in package_title for p in sp2_plans) else "-sp1"
 
-        for _, row in df.iterrows():
-            if status_col and is_cancelled_status(row.get(status_col)):
-                continue
-            pid = norm_text(row.get(pid_col))
-            dep = extract_date_yyyy_mm_dd(row.get(date_col))
-            cnt = to_int(row.get(cnt_col))
-            if not pid or not dep or cnt <= 0:
-                continue
-            spec_text = " | ".join(norm_text(row.get(c)) for c in spec_cols if norm_text(row.get(c)))
-            package_title = norm_text(row.get(pkg_col))
-            product_title = norm_text(row.get(product_col)) if product_col else ""
-            if platform == "kkday_private" and pid in KKDAY_PRIVATE_PLAN_OVERRIDES:
-                sp2_plans = KKDAY_PRIVATE_PLAN_OVERRIDES[pid]
-                pid += "-sp2" if any(p in package_title for p in sp2_plans) else "-sp1"
-
-            meal_by_spec = kkday_meal_from_specs(spec_text)
-            if meal_by_spec is not None:
-                has_meal = meal_by_spec
+        meal_by_spec = kkday_meal_from_specs(spec_text)
+        if meal_by_spec is not None:
+            has_meal = meal_by_spec
+        else:
+            meal_by_package = title_meal_signal(package_title, include_tokens=("含",))
+            if meal_by_package is not None:
+                has_meal = meal_by_package
             else:
-                meal_by_package = title_meal_signal(package_title, include_tokens=("含",))
-                if meal_by_package is not None:
-                    has_meal = meal_by_package
-                else:
-                    has_meal = any(k in product_title for k in FEATURED_MEAL_KEYWORDS)
+                has_meal = any(k in product_title for k in FEATURED_MEAL_KEYWORDS)
 
-            lang_src = spec_text if spec_text else package_title
-            lang_code = parse_lang_from_text(lang_src, lang_map)
+        lang_src = spec_text if spec_text else package_title
+        lang_code = parse_lang_from_text(lang_src, lang_map)
 
-            out.append(
-                RowRecord(
-                    platform=platform,
-                    product_pid=pid,
-                    departure_date=dep,
-                    traveller_count=cnt,
-                    has_meal=bool(has_meal),
-                    lang_code=lang_code,
-                )
+        out.append(
+            RowRecord(
+                platform=platform,
+                product_pid=pid,
+                departure_date=dep,
+                traveller_count=cnt,
+                has_meal=bool(has_meal),
+                lang_code=lang_code,
             )
+        )
     return out
 
 
@@ -285,7 +285,19 @@ def load_klook_activity_map(downloads_dir: str) -> Dict[str, str]:
     return mapping
 
 
-def parse_klook(files: List[str], activity_map: Dict[str, str]) -> List[RowRecord]:
+def _has_klook_unknown_activities(f: str, activity_map: Dict[str, str]) -> bool:
+    try:
+        df = pd.read_excel(f, usecols=["活動名稱"])
+    except Exception:
+        return False
+    for val in df["活動名稱"].dropna():
+        name = norm_text(val)
+        if name and name.lower() not in activity_map:
+            return True
+    return False
+
+
+def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], int]:
     out: List[RowRecord] = []
     lang_map = [
         ("英語", "en"),
@@ -302,129 +314,127 @@ def parse_klook(files: List[str], activity_map: Dict[str, str]) -> List[RowRecor
         ("泰文", "th"),
     ]
 
-    for f in files:
-        df = pd.read_excel(f)
-        date_col = "使用時間" if "使用時間" in df.columns else None
-        qty_col = "數量" if "數量" in df.columns else None
-        plan_col = "方案名稱" if "方案名稱" in df.columns else None
-        activity_col = "活動名稱" if "活動名稱" in df.columns else None
-        info_col = "更多資訊" if "更多資訊" in df.columns else None
-        status_col = pick_col(df, ["訂單狀態", "订单状态"])
-        if not (date_col and qty_col and plan_col and activity_col):
-            raise ValueError(
-                f"Klook order columns mismatch in {f}, required: 使用時間, 數量, 方案名稱, 活動名稱"
-            )
+    df = pd.read_excel(f)
+    date_col = "使用時間" if "使用時間" in df.columns else None
+    qty_col = "數量" if "數量" in df.columns else None
+    plan_col = "方案名稱" if "方案名稱" in df.columns else None
+    activity_col = "活動名稱" if "活動名稱" in df.columns else None
+    info_col = "更多資訊" if "更多資訊" in df.columns else None
+    status_col = pick_col(df, ["訂單狀態", "订单状态"])
+    if not (date_col and qty_col and plan_col and activity_col):
+        raise ValueError(
+            f"Klook order columns mismatch in {f}, required: 使用時間, 數量, 方案名稱, 活動名稱"
+        )
 
-        missing_mapping_count = 0
-        for _, row in df.iterrows():
-            if status_col and is_cancelled_status(row.get(status_col)):
-                continue
-            dep = extract_date_yyyy_mm_dd(row.get(date_col))
-            cnt = to_int(row.get(qty_col))
-            plan_name = norm_text(row.get(plan_col))
-            activity_name_raw = norm_text(row.get(activity_col))
-            if not dep or cnt <= 0 or not activity_name_raw:
-                continue
-            pid = activity_map.get(activity_name_raw.lower())
-            if not pid:
-                missing_mapping_count += 1
-                continue
-
-            meal_by_plan = title_meal_signal(
-                plan_name, include_tokens=("含",), extra_negative_tokens=("自理",)
-            )
-            if meal_by_plan is not None:
-                has_meal = meal_by_plan
-            else:
-                has_meal = any(k in activity_name_raw for k in FEATURED_MEAL_KEYWORDS)
-
-            info_text = norm_text(row.get(info_col))
-            lang_line = ""
-            for line in info_text.splitlines():
-                if "偏好語言" in line or "偏好语言" in line:
-                    lang_line = line
-                    break
-            lang_code = parse_lang_from_text(lang_line, lang_map)
-
-            out.append(
-                RowRecord(
-                    platform="klook",
-                    product_pid=pid,
-                    departure_date=dep,
-                    traveller_count=cnt,
-                    has_meal=bool(has_meal),
-                    lang_code=lang_code,
-                )
-            )
-        if missing_mapping_count > 0:
-            print(f"[WARN] Klook activity mapping missing rows: {missing_mapping_count}; file={os.path.basename(f)}")
-    return out
-
-
-def parse_trip(files: List[str]) -> List[RowRecord]:
-    out: List[RowRecord] = []
-    lang_map = [
-        ("英語", "en"),
-        ("英文", "en"),
-        ("日語", "ja"),
-        ("日文", "ja"),
-        ("韓語", "ko"),
-        ("韩语", "ko"),
-        ("韓文", "ko"),
-        ("韩文", "ko"),
-        ("越南語", "vi"),
-        ("越南语", "vi"),
-        ("泰語", "th"),
-        ("泰文", "th"),
-    ]
-
-    for f in files:
-        raw = pd.read_excel(f, header=None)
-        header_row = find_trip_header_row(raw)
-        header = raw.iloc[header_row].fillna("").astype(str).tolist()
-        df = raw.iloc[header_row + 1 :].copy()
-        df.columns = header
-
-        pid_col = pick_col(df, ["產品 ID", "产品 ID", "產品ID", "产品ID"])
-        date_col = pick_col(df, ["使用日期"])
-        cnt_col = pick_col(df, ["資源旅客訂單數量", "资源旅客订单数量"])
-        plan_col = pick_col(df, ["套餐名稱", "套餐名称"])
-        status_col = pick_col(df, ["訂單狀態", "订单状态", "Order Status"])
-        if not (pid_col and date_col and cnt_col and plan_col):
+    missing_mapping_count = 0
+    for _, row in df.iterrows():
+        if status_col and is_cancelled_status(row.get(status_col)):
+            continue
+        dep = extract_date_yyyy_mm_dd(row.get(date_col))
+        cnt = to_int(row.get(qty_col))
+        plan_name = norm_text(row.get(plan_col))
+        activity_name_raw = norm_text(row.get(activity_col))
+        if not dep or cnt <= 0 or not activity_name_raw:
+            continue
+        pid = activity_map.get(activity_name_raw.lower())
+        if not pid:
+            missing_mapping_count += 1
             continue
 
-        for _, row in df.iterrows():
-            if status_col and is_cancelled_status(row.get(status_col)):
-                continue
-            pid = norm_text(row.get(pid_col))
-            dep = extract_date_yyyy_mm_dd(row.get(date_col))
-            cnt = to_int(row.get(cnt_col))
-            plan = norm_text(row.get(plan_col))
-            if not pid or not dep or cnt <= 0:
-                continue
+        meal_by_plan = title_meal_signal(
+            plan_name, include_tokens=("含",), extra_negative_tokens=("自理",)
+        )
+        if meal_by_plan is not None:
+            has_meal = meal_by_plan
+        else:
+            has_meal = any(k in activity_name_raw for k in FEATURED_MEAL_KEYWORDS)
 
-            has_meal = title_meal_signal(
-                plan,
-                include_tokens=("含", "包括"),
-                meal_tokens=TRIP_TITLE_MEAL_TOKENS,
-                colon_shortcut=False,
-            ) is True
-            lang_code = parse_lang_from_text(plan, lang_map)
+        info_text = norm_text(row.get(info_col))
+        lang_line = ""
+        for line in info_text.splitlines():
+            if "偏好語言" in line or "偏好语言" in line:
+                lang_line = line
+                break
+        lang_code = parse_lang_from_text(lang_line, lang_map)
 
-            out.append(
-                RowRecord(
-                    platform="trip",
-                    product_pid=pid,
-                    departure_date=dep,
-                    traveller_count=cnt,
-                    has_meal=bool(has_meal),
-                    lang_code=lang_code,
-                )
+        out.append(
+            RowRecord(
+                platform="klook",
+                product_pid=pid,
+                departure_date=dep,
+                traveller_count=cnt,
+                has_meal=bool(has_meal),
+                lang_code=lang_code,
             )
+        )
+    if missing_mapping_count > 0:
+        print(f"[WARN] Klook activity mapping missing rows: {missing_mapping_count}; file={os.path.basename(f)}")
+    return out, missing_mapping_count
+
+
+def parse_trip(f: str) -> List[RowRecord]:
+    out: List[RowRecord] = []
+    lang_map = [
+        ("英語", "en"),
+        ("英文", "en"),
+        ("日語", "ja"),
+        ("日文", "ja"),
+        ("韓語", "ko"),
+        ("韩语", "ko"),
+        ("韓文", "ko"),
+        ("韩文", "ko"),
+        ("越南語", "vi"),
+        ("越南语", "vi"),
+        ("泰語", "th"),
+        ("泰文", "th"),
+    ]
+
+    raw = pd.read_excel(f, header=None)
+    header_row = find_trip_header_row(raw)
+    header = raw.iloc[header_row].fillna("").astype(str).tolist()
+    df = raw.iloc[header_row + 1 :].copy()
+    df.columns = header
+
+    pid_col = pick_col(df, ["產品 ID", "产品 ID", "產品ID", "产品ID"])
+    date_col = pick_col(df, ["使用日期"])
+    cnt_col = pick_col(df, ["資源旅客訂單數量", "资源旅客订单数量"])
+    plan_col = pick_col(df, ["套餐名稱", "套餐名称"])
+    status_col = pick_col(df, ["訂單狀態", "订单状态", "Order Status"])
+    if not (pid_col and date_col and cnt_col and plan_col):
+        return out
+
+    for _, row in df.iterrows():
+        if status_col and is_cancelled_status(row.get(status_col)):
+            continue
+        pid = norm_text(row.get(pid_col))
+        dep = extract_date_yyyy_mm_dd(row.get(date_col))
+        cnt = to_int(row.get(cnt_col))
+        plan = norm_text(row.get(plan_col))
+        if not pid or not dep or cnt <= 0:
+            continue
+
+        has_meal = title_meal_signal(
+            plan,
+            include_tokens=("含", "包括"),
+            meal_tokens=TRIP_TITLE_MEAL_TOKENS,
+            colon_shortcut=False,
+        ) is True
+        lang_code = parse_lang_from_text(plan, lang_map)
+
+        out.append(
+            RowRecord(
+                platform="trip",
+                product_pid=pid,
+                departure_date=dep,
+                traveller_count=cnt,
+                has_meal=bool(has_meal),
+                lang_code=lang_code,
+            )
+        )
     return out
 
 
-def parse_gyg(files: List[str]) -> List[RowRecord]:
+def parse_gyg(f: str) -> List[RowRecord]:
     out: List[RowRecord] = []
     lang_map = {
         "english": "en",
@@ -435,65 +445,64 @@ def parse_gyg(files: List[str]) -> List[RowRecord]:
     }
     meal_tokens = ("breakfast", "lunch", "dinner", "brunch", "linner", "dunch")
 
-    for f in files:
-        df = pd.read_excel(f)
-        date_col = pick_col(df, ["Date"])
-        product_col = pick_col(df, ["Product"])
-        option_col = pick_col(df, ["Option"])
-        lang_col = pick_col(df, ["Language"])
-        if not (date_col and product_col and option_col and lang_col):
+    df = pd.read_excel(f)
+    date_col = pick_col(df, ["Date"])
+    product_col = pick_col(df, ["Product"])
+    option_col = pick_col(df, ["Option"])
+    lang_col = pick_col(df, ["Language"])
+    if not (date_col and product_col and option_col and lang_col):
+        return out
+
+    count_cols = [
+        c
+        for c in [
+            "Adult",
+            "Senior",
+            "Student (with ID)",
+            "EU citizens (with ID)",
+            "Student EU citizens (with ID)",
+            "Military (with ID)",
+            "Youth",
+            "Child",
+            "Infant",
+            "Add-ons",
+            "Group",
+        ]
+        if c in df.columns
+    ]
+
+    for _, row in df.iterrows():
+        dep = extract_date_yyyy_mm_dd(row.get(date_col))
+        product = norm_text(row.get(product_col))
+        option = norm_text(row.get(option_col))
+        if not dep or not product:
             continue
 
-        count_cols = [
-            c
-            for c in [
-                "Adult",
-                "Senior",
-                "Student (with ID)",
-                "EU citizens (with ID)",
-                "Student EU citizens (with ID)",
-                "Military (with ID)",
-                "Youth",
-                "Child",
-                "Infant",
-                "Add-ons",
-                "Group",
-            ]
-            if c in df.columns
-        ]
+        m = re.match(r"(\d+)", product)
+        pid = m.group(1) if m else product
 
-        for _, row in df.iterrows():
-            dep = extract_date_yyyy_mm_dd(row.get(date_col))
-            product = norm_text(row.get(product_col))
-            option = norm_text(row.get(option_col))
-            if not dep or not product:
-                continue
+        cnt = sum(to_int(row.get(c), 0) for c in count_cols)
+        if cnt <= 0:
+            continue
 
-            m = re.match(r"(\d+)", product)
-            pid = m.group(1) if m else product
+        has_meal = any(t in option.lower() for t in meal_tokens)
+        lang_text = norm_text(row.get(lang_col)).lower()
+        lang_code = None
+        for k, v in lang_map.items():
+            if k in lang_text:
+                lang_code = v
+                break
 
-            cnt = sum(to_int(row.get(c), 0) for c in count_cols)
-            if cnt <= 0:
-                continue
-
-            has_meal = any(t in option.lower() for t in meal_tokens)
-            lang_text = norm_text(row.get(lang_col)).lower()
-            lang_code = None
-            for k, v in lang_map.items():
-                if k in lang_text:
-                    lang_code = v
-                    break
-
-            out.append(
-                RowRecord(
-                    platform="gyg",
-                    product_pid=pid,
-                    departure_date=dep,
-                    traveller_count=cnt,
-                    has_meal=has_meal,
-                    lang_code=lang_code,
-                )
+        out.append(
+            RowRecord(
+                platform="gyg",
+                product_pid=pid,
+                departure_date=dep,
+                traveller_count=cnt,
+                has_meal=has_meal,
+                lang_code=lang_code,
             )
+        )
     return out
 
 
@@ -619,59 +628,57 @@ def send_lark_notification(webhook: str, title: str, content: str, timeout_sec: 
         return False, f"{type(e).__name__}: {e}"
 
 
-def wait_for_pad_flows() -> Tuple[bool, List[str]]:
+def _run_single_pad_flow(flow: dict) -> bool:
+    """触发单个 PAD 流并等待其信号文件。成功返回 True，失败/超时返回 False。"""
     os.makedirs(PAD_SIGNAL_DIR, exist_ok=True)
-    for f in PAD_FLOWS:
-        path = os.path.join(PAD_SIGNAL_DIR, f"flow_{f['name']}.json")
+    path = os.path.join(PAD_SIGNAL_DIR, f"flow_{flow['name']}.json")
+    if os.path.exists(path):
+        os.remove(path)
+    url = (
+        f"ms-powerautomate://console/flow/run"
+        f"?environmentid={PAD_ENV_ID}&workflowid={flow['flow_id']}&source=Other"
+    )
+    subprocess.Popen(f'start "" "{url}"', shell=True)
+    print(f"[触发] {flow['name']}")
+    start = time.time()
+    while time.time() - start < PAD_TIMEOUT_SEC:
         if os.path.exists(path):
-            os.remove(path)
+            try:
+                with open(path, encoding="utf-16") as fp:
+                    status = json.loads(fp.read()).get("status")
+            except Exception:
+                status = None
+            if status == "success":
+                print(f"[完成] {flow['name']}")
+                return True
+            elif status is not None:
+                return False
+        time.sleep(PAD_POLL_INTERVAL)
+    return False
 
+
+def wait_for_pad_flows() -> Tuple[bool, List[str]]:
     for f in PAD_FLOWS:
-        url = (
-            f"ms-powerautomate://console/flow/run"
-            f"?environmentid={PAD_ENV_ID}&workflowid={f['flow_id']}&source=Other"
-        )
-        subprocess.Popen(f'start "" "{url}"', shell=True)
-        print(f"[触发] {f['name']}")
-
-        path = os.path.join(PAD_SIGNAL_DIR, f"flow_{f['name']}.json")
-        start = time.time()
-        while time.time() - start < PAD_TIMEOUT_SEC:
-            if os.path.exists(path):
-                try:
-                    with open(path, encoding="utf-16") as fp:
-                        status = json.loads(fp.read()).get("status")
-                except Exception:
-                    status = None
-                if status == "success":
-                    print(f"[完成] {f['name']}")
-                    break
-                elif status is not None:
-                    return False, [f["name"]]
-            time.sleep(PAD_POLL_INTERVAL)
-        else:
+        if not _run_single_pad_flow(f):
             return False, [f["name"]]
-
     return True, []
 
 
-def discover(downloads_dir: str) -> Dict[str, List[str]]:
-    all_csv = sorted(glob.glob(os.path.join(downloads_dir, "*.csv")))
-    kkday_private_files = [
-        p for p in all_csv if os.path.basename(p).lower().startswith("kkday_private")
-    ]
-    kkday_files = [
-        p
-        for p in all_csv
-        if os.path.basename(p).lower().startswith("kkday_group")
-    ]
+def discover(downloads_dir: str) -> Dict[str, Optional[str]]:
+    def latest(pattern: str) -> Optional[str]:
+        candidates = [
+            p for p in glob.glob(os.path.join(downloads_dir, pattern))
+            if not os.path.basename(p).startswith("~$")
+        ]
+        return max(candidates, key=os.path.getmtime) if candidates else None
+
     return {
-        "kkday": kkday_files,
-        "kkday_private": kkday_private_files,
-        "klook": sorted(p for p in glob.glob(os.path.join(downloads_dir, "bookinglist_-_*.xlsx")) if not os.path.basename(p).startswith("~$")),
-        "klook_activities": sorted(p for p in glob.glob(os.path.join(downloads_dir, "klook_activities*.xlsx")) if not os.path.basename(p).startswith("~$")),
-        "gyg": sorted(p for p in glob.glob(os.path.join(downloads_dir, "bookings-export*.xlsx")) if not os.path.basename(p).startswith("~$")),
-        "trip": sorted(p for p in glob.glob(os.path.join(downloads_dir, "*ClientOrder*.xlsx")) if not os.path.basename(p).startswith("~$")),
+        "kkday":            latest("kkday_group*.csv"),
+        "kkday_private":    latest("kkday_private*.csv"),
+        "klook":            latest("bookinglist_-_*.xlsx"),
+        "klook_activities": latest("klook_activities*.xlsx"),
+        "gyg":              latest("bookings-export*.xlsx"),
+        "trip":             latest("*ClientOrder*.xlsx"),
     }
 
 
@@ -705,12 +712,11 @@ def clear_input_dir(input_dir: str) -> None:
     print(f"[清空] 已归档旧文件至: {archive_dir}")
 
 
-def archive_source_files(input_dir: str, files: Dict[str, List[str]]) -> str:
+def archive_source_files(input_dir: str, files: Dict[str, Optional[str]]) -> str:
     archive_dir = make_archive_dir(input_dir)
-    all_paths = [p for k, paths in files.items() if k != "klook_activities" for p in paths]
-    for src in all_paths:
-        dst = os.path.join(archive_dir, os.path.basename(src))
-        os.rename(src, dst)
+    for k, p in files.items():
+        if k != "klook_activities" and p:
+            os.rename(p, os.path.join(archive_dir, os.path.basename(p)))
     return archive_dir
 
 
@@ -722,22 +728,23 @@ def run(
     enable_post: bool,
     post_batch_size: int,
     start_time: Optional[datetime] = None,
+    enable_pad: bool = False,
+    silent: bool = False,
 ) -> int:
     files = discover(input_dir)
-    kkday_files = files.get("kkday", [])
-    kkday_private_files = files.get("kkday_private", [])
     missing_docs: List[str] = []
-    if len(kkday_files) < 1:
+    if not files.get("kkday"):
         missing_docs.append("kkday")
-    if len(kkday_private_files) < 1:
+    if not files.get("kkday_private"):
         missing_docs.append("kkday_private")
-    if len(files.get("klook", [])) < 1:
+    if not files.get("klook"):
         missing_docs.append("klook")
-    if len(files.get("gyg", [])) < 1:
+    if not files.get("gyg"):
         missing_docs.append("gyg")
-    if len(files.get("trip", [])) < 1:
+    if not files.get("trip"):
         missing_docs.append("trip")
-    if len(files.get("klook_activities", [])) < 1:
+    klook_activities_missing = not files.get("klook_activities")
+    if klook_activities_missing and not enable_pad:
         missing_docs.append("klook_activities")
 
     if missing_docs:
@@ -752,21 +759,42 @@ def run(
             (
                 f"目录: {os.path.abspath(input_dir)}\n"
                 f"缺失文档: {', '.join(missing_docs)}\n"
-                f"文件统计: kkday={len(kkday_files)}, kkday_private={len(kkday_private_files)}, "
-                f"klook={len(files.get('klook', []))}, "
-                f"gyg={len(files.get('gyg', []))}, trip={len(files.get('trip', []))}, "
-                f"klook_activities={len(files.get('klook_activities', []))}"
+                f"文件统计: "
+                + ", ".join(f"{k}={'1' if v else '0'}" for k, v in files.items())
             ),
             timeout_sec=DEFAULT_TIMEOUT_SEC,
         )
         print(f"[错误] {missing_msg}")
         return 1
+
+    # 条件1：启用 PAD 且 klook_activities 文件缺失，触发专项流下载
+    if enable_pad and klook_activities_missing:
+        print("[信息] klook_activities 映射文件缺失，触发 PAD 流获取...")
+        if not _run_single_pad_flow(KLOOK_ACTIVITIES_FLOW):
+            send_lark_notification(
+                DEFAULT_LARK_WEBHOOK,
+                "PAD流执行失败",
+                f"失败/超时平台: {KLOOK_ACTIVITIES_FLOW['name']}",
+                timeout_sec=DEFAULT_TIMEOUT_SEC,
+            )
+            print(f"[错误] PAD流失败: ['{KLOOK_ACTIVITIES_FLOW['name']}']")
+            return 1
+        files = discover(input_dir)
+
     klook_activity_map = load_klook_activity_map(input_dir)
 
     rows: List[RowRecord] = []
     rows.extend(parse_kkday(files["kkday"], platform="kkday"))
     rows.extend(parse_kkday(files["kkday_private"], platform="kkday_private"))
-    rows.extend(parse_klook(files["klook"], klook_activity_map))
+    # 条件2：预检有未映射活动，先刷新映射再解析
+    if enable_pad and _has_klook_unknown_activities(files["klook"], klook_activity_map):
+        print("[信息] klook 存在未映射活动，触发 PAD 流刷新映射...")
+        if _run_single_pad_flow(KLOOK_ACTIVITIES_FLOW):
+            klook_activity_map = load_klook_activity_map(input_dir)
+        else:
+            print("[警告] klook_activities PAD 流执行失败，继续使用现有映射")
+    klook_rows, _ = parse_klook(files["klook"], klook_activity_map)
+    rows.extend(klook_rows)
     rows.extend(parse_gyg(files["gyg"]))
     rows.extend(parse_trip(files["trip"]))
 
@@ -779,7 +807,7 @@ def run(
         by_platform = defaultdict(int)
         for p in payloads:
             by_platform[p["platform"]] += 1
-        print(f"[信息] 文件统计: { {k: len(v) for k, v in files.items()} }")
+        print(f"[信息] 文件统计: { {k: (1 if v else 0) for k, v in files.items()} }")
         print(f"[信息] 标准化记录数: {len(rows)}")
         print(f"[信息] 聚合条目数: {len(payloads)}")
         print(f"[信息] 各平台条目: {dict(by_platform)}")
@@ -847,7 +875,7 @@ def run(
     end_3m = today.replace(year=today.year + (m3 - 1) // 12, month=(m3 - 1) % 12 + 1)
     date_range_str = f"{today.year}/{today.month}/{today.day} ~ {end_3m.year}/{end_3m.month}/{end_3m.day}"
     send_lark_notification(
-        SUCCESS_LARK_WEBHOOK,
+        DEFAULT_LARK_WEBHOOK if silent else SUCCESS_LARK_WEBHOOK,
         "处理完成",
         (
             f"订单记录: {rows_by_platform}\n"
@@ -876,6 +904,7 @@ def main() -> int:
     parser.add_argument("--post-batch-size", type=int, default=200, help="items per POST request; <=0 means all in one request")
     parser.add_argument("-v", "--verbose", action="store_true", help="print details")
     parser.add_argument("--pad", action="store_true", default=False, help="trigger PAD flows and wait before aggregating")
+    parser.add_argument("--silent", action="store_true", default=False, help="send success notification to default webhook instead of success webhook")
     args = parser.parse_args()
 
     endpoint = DEFAULT_POST_TARGET if args.no_dev else DEV_POST_TARGET
@@ -909,6 +938,8 @@ def main() -> int:
             enable_post=not args.no_post,
             post_batch_size=args.post_batch_size,
             start_time=start_time,
+            enable_pad=args.pad,
+            silent=args.silent,
         )
     except Exception as e:  # noqa: BLE001
         err_text = f"{type(e).__name__}: {e}"
