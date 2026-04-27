@@ -6,6 +6,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 import warnings
@@ -191,10 +192,7 @@ def find_trip_header_row(raw_df: pd.DataFrame) -> int:
 
 
 def build_kkday_lang_map(customer_csv: str) -> Dict[str, str]:
-    try:
-        df = pd.read_csv(customer_csv, header=1, encoding="utf-8-sig", dtype=str)
-    except Exception:
-        return {}
+    df = pd.read_csv(customer_csv, header=1, encoding="utf-8-sig", dtype=str)
     order_col = pick_col(df, ["訂單編號", "订单编号"])
     lang_col = pick_col(df, ["導覽語言", "导览语言"])
     if not (order_col and lang_col):
@@ -204,9 +202,8 @@ def build_kkday_lang_map(customer_csv: str) -> Dict[str, str]:
         oid = norm_text(row.get(order_col))
         if not oid:
             continue
-        lang = norm_text(row.get(lang_col))
-        if lang and oid not in result:
-            result[oid] = lang
+        if oid not in result:
+            result[oid] = norm_text(row.get(lang_col))
     return result
 
 
@@ -249,10 +246,10 @@ def parse_kkday(f: str, platform: str, order_lang: Dict[str, str] = None) -> Lis
             else:
                 has_meal = any(k in product_title for k in FEATURED_MEAL_KEYWORDS)
 
-        oid = norm_text(row.get(order_col)) if order_col else ""
-        lang_code: Optional[str] = order_lang.get(oid) if order_lang else None
-        if order_lang and lang_code is None:
+        oid = norm_text(row.get(order_col))
+        if order_lang and oid not in order_lang:
             print(f"[警告] 导览语言未匹配: 訂單編號={oid or '(空)'} pid={pid}")
+        lang_code: Optional[str] = (order_lang.get(oid) or None) if order_lang else None
 
         out.append(
             RowRecord(
@@ -663,11 +660,8 @@ def _run_single_pad_flow(flow: dict) -> bool:
 
 
 def wait_for_pad_flows() -> Tuple[bool, List[str]]:
-    if os.path.isdir(PAD_SIGNAL_DIR):
-        for fn in os.listdir(PAD_SIGNAL_DIR):
-            if fn.endswith(".json"):
-                os.remove(os.path.join(PAD_SIGNAL_DIR, fn))
-    os.makedirs(PAD_SIGNAL_DIR, exist_ok=True)
+    shutil.rmtree(PAD_SIGNAL_DIR, ignore_errors=True)
+    os.makedirs(PAD_SIGNAL_DIR)
     for f in PAD_FLOWS:
         if not _run_single_pad_flow(f):
             return False, [f["name"]]
