@@ -36,8 +36,8 @@ PAD_TIMEOUT_SEC = 1200
 PAD_POLL_INTERVAL = 5
 PAD_FLOWS = [
     {"name": "kkday",                  "flow_id": "d1048b69-0d56-4cf2-8780-a8b76eb74f0d"},
-    {"name": "kkday_private",          "flow_id": "a7754e52-7a38-f111-88b4-6045bd1ff239"},
     {"name": "kkday_customer",         "flow_id": "362cacd8-b73f-f111-bec6-6045bd1ff239"},
+    {"name": "kkday_private",          "flow_id": "a7754e52-7a38-f111-88b4-6045bd1ff239"},
     {"name": "kkday_customer_private", "flow_id": "ba152c77-fb41-f111-bec6-6045bd1ff239"},
     {"name": "klook",         "flow_id": "93e77ca5-a3d2-47db-89c5-9e546786527d"},
     {"name": "gyg",           "flow_id": "68f530f2-886a-4730-b3be-9ea0b1b947d0"},
