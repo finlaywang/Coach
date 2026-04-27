@@ -15,11 +15,28 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install UPX
+        run: choco install upx -y
+
       - name: Install dependencies
         run: pip install pandas openpyxl pyinstaller
 
       - name: Build EXE
-        run: pyinstaller --onefile --name ota_daily_report ota_daily_report.py
+        run: >
+          pyinstaller --onefile --name ota_daily_report
+          --exclude-module matplotlib
+          --exclude-module scipy
+          --exclude-module PIL
+          --exclude-module Pillow
+          --exclude-module IPython
+          --exclude-module numba
+          --exclude-module numexpr
+          --exclude-module bottleneck
+          --exclude-module tkinter
+          --exclude-module PyQt5
+          --exclude-module PyQt6
+          --upx-dir "C:/ProgramData/chocolatey/lib/upx/tools"
+          ota_daily_report.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
