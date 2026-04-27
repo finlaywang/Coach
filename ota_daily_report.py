@@ -195,16 +195,9 @@ def build_kkday_lang_map(customer_csv: str) -> Dict[str, str]:
     df = pd.read_csv(customer_csv, header=1, encoding="utf-8-sig", dtype=str)
     order_col = pick_col(df, ["訂單編號", "订单编号"])
     lang_col = pick_col(df, ["導覽語言", "导览语言"])
-    if not (order_col and lang_col):
-        return {}
-    result: Dict[str, str] = {}
-    for _, row in df.iterrows():
-        oid = norm_text(row.get(order_col))
-        if not oid:
-            continue
-        if oid not in result:
-            result[oid] = norm_text(row.get(lang_col))
-    return result
+    df = df[df[order_col].notna() & (df[order_col].str.strip() != "")]
+    df = df.drop_duplicates(subset=[order_col], keep="first")
+    return dict(zip(df[order_col].str.strip(), df[lang_col].fillna("").str.strip()))
 
 
 def parse_kkday(f: str, platform: str, order_lang: Dict[str, str] = None) -> List[RowRecord]:
@@ -891,6 +884,7 @@ def run(
         "处理完成",
         (
             f"订单记录: {rows_by_platform}\n"
+            f"customer文件: kkday={len(kkday_lang)} kkday_private={len(kkday_private_lang)}\n"
             f"聚合条目: {len(payloads)}\n"
             f"统计时长: {date_range_str}\n"
             f"运行时间: {time_str}\n"
