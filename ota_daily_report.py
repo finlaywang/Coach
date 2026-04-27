@@ -638,11 +638,7 @@ def send_lark_notification(webhook: str, title: str, content: str, timeout_sec: 
 
 
 def _run_single_pad_flow(flow: dict) -> bool:
-    """触发单个 PAD 流并等待其信号文件。成功返回 True，失败/超时返回 False。"""
-    os.makedirs(PAD_SIGNAL_DIR, exist_ok=True)
     path = os.path.join(PAD_SIGNAL_DIR, f"flow_{flow['name']}.json")
-    if os.path.exists(path):
-        os.remove(path)
     url = (
         f"ms-powerautomate://console/flow/run"
         f"?environmentid={PAD_ENV_ID}&workflowid={flow['flow_id']}&source=Other"
@@ -667,6 +663,11 @@ def _run_single_pad_flow(flow: dict) -> bool:
 
 
 def wait_for_pad_flows() -> Tuple[bool, List[str]]:
+    if os.path.isdir(PAD_SIGNAL_DIR):
+        for fn in os.listdir(PAD_SIGNAL_DIR):
+            if fn.endswith(".json"):
+                os.remove(os.path.join(PAD_SIGNAL_DIR, fn))
+    os.makedirs(PAD_SIGNAL_DIR, exist_ok=True)
     for f in PAD_FLOWS:
         if not _run_single_pad_flow(f):
             return False, [f["name"]]
