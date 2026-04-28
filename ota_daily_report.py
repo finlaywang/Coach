@@ -7,10 +7,9 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import time
 import warnings
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -134,6 +133,21 @@ KKDAY_SPEC_ADDON_TOKENS = ("鍋", "料理", "宴", "餐")
 
 DEFAULT_TITLE_MEAL_TOKENS = ("餐", "套餐", "餐食", "早餐", "午餐", "晚餐", "鍋", "宴", "御膳", "料理")
 TRIP_TITLE_MEAL_TOKENS = ("餐", "餐食", "早餐", "午餐", "晚餐", "宴", "鍋", "御膳")
+
+LANG_MAP: List[Tuple[str, str]] = [
+    ("英語", "en"),
+    ("英文", "en"),
+    ("日語", "ja"),
+    ("日文", "ja"),
+    ("韓語", "ko"),
+    ("韩语", "ko"),
+    ("韓文", "ko"),
+    ("韩文", "ko"),
+    ("越南語", "vi"),
+    ("越南语", "vi"),
+    ("泰語", "th"),
+    ("泰文", "th"),
+]
 
 KKDAY_PRIVATE_PLAN_OVERRIDES: Dict[str, List[str]] = {
     "25703": [
@@ -298,20 +312,6 @@ def _has_klook_unknown_activities(f: str, activity_map: Dict[str, str]) -> bool:
 
 def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], int]:
     out: List[RowRecord] = []
-    lang_map = [
-        ("英語", "en"),
-        ("英文", "en"),
-        ("日語", "ja"),
-        ("日文", "ja"),
-        ("韓語", "ko"),
-        ("韩语", "ko"),
-        ("韓文", "ko"),
-        ("韩文", "ko"),
-        ("越南語", "vi"),
-        ("越南语", "vi"),
-        ("泰語", "th"),
-        ("泰文", "th"),
-    ]
 
     df = pd.read_excel(f)
     date_col = "使用時間" if "使用時間" in df.columns else None
@@ -354,7 +354,7 @@ def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], 
             if "偏好語言" in line or "偏好语言" in line:
                 lang_line = line
                 break
-        lang_code = parse_lang_from_text(lang_line, lang_map)
+        lang_code = parse_lang_from_text(lang_line, LANG_MAP)
 
         out.append(
             RowRecord(
@@ -373,20 +373,6 @@ def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], 
 
 def parse_trip(f: str) -> List[RowRecord]:
     out: List[RowRecord] = []
-    lang_map = [
-        ("英語", "en"),
-        ("英文", "en"),
-        ("日語", "ja"),
-        ("日文", "ja"),
-        ("韓語", "ko"),
-        ("韩语", "ko"),
-        ("韓文", "ko"),
-        ("韩文", "ko"),
-        ("越南語", "vi"),
-        ("越南语", "vi"),
-        ("泰語", "th"),
-        ("泰文", "th"),
-    ]
 
     raw = pd.read_excel(f, header=None)
     header_row = find_trip_header_row(raw)
@@ -418,7 +404,7 @@ def parse_trip(f: str) -> List[RowRecord]:
             meal_tokens=TRIP_TITLE_MEAL_TOKENS,
             colon_shortcut=False,
         ) is True
-        lang_code = parse_lang_from_text(plan, lang_map)
+        lang_code = parse_lang_from_text(plan, LANG_MAP)
 
         out.append(
             RowRecord(
@@ -633,7 +619,7 @@ def _run_single_pad_flow(flow: dict) -> bool:
         f"ms-powerautomate://console/flow/run"
         f"?environmentid={PAD_ENV_ID}&workflowid={flow['flow_id']}&source=Other"
     )
-    subprocess.Popen(f'start "" "{url}"', shell=True)
+    os.startfile(url)
     print(f"[触发] {flow['name']}")
     start = time.time()
     while time.time() - start < PAD_TIMEOUT_SEC:
@@ -731,21 +717,8 @@ def run(
     silent: bool = False,
 ) -> int:
     files = discover(input_dir)
-    missing_docs: List[str] = []
-    if not files.get("kkday"):
-        missing_docs.append("kkday")
-    if not files.get("kkday_private"):
-        missing_docs.append("kkday_private")
-    if not files.get("kkday_customer"):
-        missing_docs.append("kkday_customer")
-    if not files.get("kkday_customer_private"):
-        missing_docs.append("kkday_customer_private")
-    if not files.get("klook"):
-        missing_docs.append("klook")
-    if not files.get("gyg"):
-        missing_docs.append("gyg")
-    if not files.get("trip"):
-        missing_docs.append("trip")
+    _required = ["kkday", "kkday_private", "kkday_customer", "kkday_customer_private", "klook", "gyg", "trip"]
+    missing_docs = [k for k in _required if not files.get(k)]
     klook_activities_missing = not files.get("klook_activities")
     if klook_activities_missing and not enable_pad:
         missing_docs.append("klook_activities")
@@ -868,12 +841,13 @@ def run(
         f"（耗时 {elapsed_min} 分 {elapsed_sec} 秒）"
         if start_time else f"{end_time.strftime('%H:%M')}"
     )
+    platform_counts = Counter(r.platform for r in rows)
     rows_by_platform = (
-        f"kkday={sum(1 for r in rows if r.platform == 'kkday')} "
-        f"kkday专属团={sum(1 for r in rows if r.platform == 'kkday_private')} "
-        f"klook={sum(1 for r in rows if r.platform == 'klook')} "
-        f"gyg={sum(1 for r in rows if r.platform == 'gyg')} "
-        f"trip={sum(1 for r in rows if r.platform == 'trip')}"
+        f"kkday={platform_counts['kkday']}(订{len(kkday_lang)}) "
+        f"kkday专属团={platform_counts['kkday_private']}(订{len(kkday_private_lang)}) "
+        f"klook={platform_counts['klook']} "
+        f"gyg={platform_counts['gyg']} "
+        f"trip={platform_counts['trip']}"
     )
     today = end_time.date()
     m3 = today.month + 3
@@ -884,7 +858,6 @@ def run(
         "处理完成",
         (
             f"订单记录: {rows_by_platform}\n"
-            f"customer文件: kkday={len(kkday_lang)} kkday_private={len(kkday_private_lang)}\n"
             f"聚合条目: {len(payloads)}\n"
             f"统计时长: {date_range_str}\n"
             f"运行时间: {time_str}\n"
