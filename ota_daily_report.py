@@ -314,15 +314,14 @@ def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], 
     out: List[RowRecord] = []
 
     df = pd.read_excel(f)
-    date_col = "使用時間" if "使用時間" in df.columns else None
-    qty_col = "數量" if "數量" in df.columns else None
-    plan_col = "方案名稱" if "方案名稱" in df.columns else None
-    activity_col = "活動名稱" if "活動名稱" in df.columns else None
-    info_col = "更多資訊" if "更多資訊" in df.columns else None
+    date_col = pick_col(df, ["使用時間", "使用时间"])
+    plan_col = pick_col(df, ["方案名稱", "方案名称"])
+    activity_col = pick_col(df, ["活動名稱", "活动名称"])
+    lang_col = pick_col(df, ["10010010-偏好語言", "10010010-偏好语言"])
     status_col = pick_col(df, ["訂單狀態", "订单状态"])
-    if not (date_col and qty_col and plan_col and activity_col):
+    if not (date_col and plan_col and activity_col):
         raise ValueError(
-            f"Klook order columns mismatch in {f}, required: 使用時間, 數量, 方案名稱, 活動名稱"
+            f"Klook order columns mismatch in {f}, required: 使用時間, 方案名稱, 活動名稱"
         )
 
     missing_mapping_count = 0
@@ -330,10 +329,9 @@ def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], 
         if status_col and is_cancelled_status(row.get(status_col)):
             continue
         dep = extract_date_yyyy_mm_dd(row.get(date_col))
-        cnt = to_int(row.get(qty_col))
         plan_name = norm_text(row.get(plan_col))
         activity_name_raw = norm_text(row.get(activity_col))
-        if not dep or cnt <= 0 or not activity_name_raw:
+        if not dep or not activity_name_raw:
             continue
         pid = activity_map.get(activity_name_raw.lower())
         if not pid:
@@ -348,20 +346,14 @@ def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], 
         else:
             has_meal = any(k in activity_name_raw for k in FEATURED_MEAL_KEYWORDS)
 
-        info_text = norm_text(row.get(info_col))
-        lang_line = ""
-        for line in info_text.splitlines():
-            if "偏好語言" in line or "偏好语言" in line:
-                lang_line = line
-                break
-        lang_code = parse_lang_from_text(lang_line, LANG_MAP)
+        lang_code = parse_lang_from_text(norm_text(row.get(lang_col)), LANG_MAP) if lang_col else None
 
         out.append(
             RowRecord(
                 platform="klook",
                 product_pid=pid,
                 departure_date=dep,
-                traveller_count=cnt,
+                traveller_count=1,
                 has_meal=bool(has_meal),
                 lang_code=lang_code,
             )
@@ -371,20 +363,24 @@ def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], 
     return out, missing_mapping_count
 
 
+TRIP_BCP47_LANG_CODES = {"en", "ja", "ko", "th", "vi"}
+
+
 def parse_trip(f: str) -> List[RowRecord]:
     out: List[RowRecord] = []
 
-    raw = pd.read_excel(f, header=None)
+    raw = pd.read_excel(f, sheet_name="待辦事項", header=None)
     header_row = find_trip_header_row(raw)
     header = raw.iloc[header_row].fillna("").astype(str).tolist()
     df = raw.iloc[header_row + 1 :].copy()
     df.columns = header
 
-    pid_col = pick_col(df, ["產品 ID", "产品 ID", "產品ID", "产品ID"])
+    pid_col = pick_col(df, ["產品 ID", "产品 ID"])
     date_col = pick_col(df, ["使用日期"])
-    cnt_col = pick_col(df, ["資源旅客訂單數量", "资源旅客订单数量"])
+    cnt_col = pick_col(df, ["訂單數量", "订单数量"])
     plan_col = pick_col(df, ["套餐名稱", "套餐名称"])
-    status_col = pick_col(df, ["訂單狀態", "订单状态", "Order Status"])
+    lang_col = pick_col(df, ["訂單語言", "订单语言"])
+    status_col = pick_col(df, ["訂單狀態", "订单状态"])
     if not (pid_col and date_col and cnt_col and plan_col):
         return out
 
@@ -404,7 +400,8 @@ def parse_trip(f: str) -> List[RowRecord]:
             meal_tokens=TRIP_TITLE_MEAL_TOKENS,
             colon_shortcut=False,
         ) is True
-        lang_code = parse_lang_from_text(plan, LANG_MAP)
+        prefix = norm_text(row.get(lang_col)).split("-", 1)[0].lower() if lang_col else ""
+        lang_code = prefix if prefix in TRIP_BCP47_LANG_CODES else None
 
         out.append(
             RowRecord(
@@ -663,7 +660,7 @@ def discover(downloads_dir: str) -> Dict[str, Optional[str]]:
         "klook":            latest("bookinglist_-_*.xlsx"),
         "klook_activities": latest("klook_activities*.xlsx"),
         "gyg":              latest("bookings-export*.xlsx"),
-        "trip":             latest("*ClientOrder*.xlsx"),
+        "trip":             latest("0G*.xlsx"),
     }
 
 
