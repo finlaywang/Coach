@@ -897,7 +897,6 @@ def send_lark_notification(webhook: str, title: str, content: str, timeout_sec: 
 
 def _run_single_pad_flow(flow: dict) -> bool:
     path = os.path.join(PAD_SIGNAL_DIR, f"flow_{flow['name']}.json")
-    os.makedirs(PAD_SIGNAL_DIR, exist_ok=True)
     url = (
         f"ms-powerautomate://console/flow/run"
         f"?environmentid={PAD_ENV_ID}&workflowid={flow['flow_id']}&source=Other"
