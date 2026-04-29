@@ -35,6 +35,7 @@ PAD_ENV_ID = "Default-217d672b-4f71-439b-b886-cf526beaa100"
 PAD_SIGNAL_DIR = r"C:\RPA\signals"
 PAD_TIMEOUT_SEC = 1200
 PAD_POLL_INTERVAL = 5
+PAD_FILE_SETTLE_SEC = 3
 PAD_FLOWS = [
     {"name": "kkday",                  "flow_id": "d1048b69-0d56-4cf2-8780-a8b76eb74f0d"},
     {"name": "kkday_customer",         "flow_id": "362cacd8-b73f-f111-bec6-6045bd1ff239"},
@@ -1039,7 +1040,17 @@ def run(
             )
             print(f"[错误] PAD流失败: ['{KLOOK_ACTIVITIES_FLOW['name']}']")
             return 1
+        time.sleep(PAD_FILE_SETTLE_SEC)
         files = discover(input_dir)
+        if not files.get("klook_activities"):
+            send_lark_notification(
+                DEFAULT_LARK_WEBHOOK,
+                "PAD流执行失败",
+                f"PAD 报成功但 klook_activities 文件仍未找到: {os.path.abspath(input_dir)}",
+                timeout_sec=DEFAULT_TIMEOUT_SEC,
+            )
+            print("[错误] PAD 流报成功但 klook_activities 文件仍未找到")
+            return 1
 
     klook_activity_map = load_klook_activity_map(input_dir)
 
@@ -1052,10 +1063,24 @@ def run(
     if enable_pad and _has_klook_unknown_activities(files["klook"], klook_activity_map):
         print("[信息] klook 存在未映射活动，触发 PAD 流刷新映射...")
         if _run_single_pad_flow(KLOOK_ACTIVITIES_FLOW):
+            time.sleep(PAD_FILE_SETTLE_SEC)
             klook_activity_map = load_klook_activity_map(input_dir)
         else:
+            send_lark_notification(
+                DEFAULT_LARK_WEBHOOK,
+                "Klook 映射刷新失败",
+                "klook_activities PAD 流执行失败，继续使用现有映射，部分 klook 订单可能被丢弃",
+                timeout_sec=DEFAULT_TIMEOUT_SEC,
+            )
             print("[警告] klook_activities PAD 流执行失败，继续使用现有映射")
-    klook_orders, _ = parse_klook(files["klook"], klook_activity_map)
+    klook_orders, missing_mapping_count = parse_klook(files["klook"], klook_activity_map)
+    if missing_mapping_count > 0:
+        send_lark_notification(
+            DEFAULT_LARK_WEBHOOK,
+            "Klook 活动映射缺失",
+            f"有 {missing_mapping_count} 条 klook 订单因活动未映射被跳过，请检查 klook_activities 文件",
+            timeout_sec=DEFAULT_TIMEOUT_SEC,
+        )
     orders.extend(klook_orders)
     orders.extend(parse_gyg(files["gyg"]))
     orders.extend(parse_trip(files["trip"]))
