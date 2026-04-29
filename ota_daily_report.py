@@ -1004,8 +1004,7 @@ def run(
     files = discover(input_dir)
     _required = ["kkday", "kkday_private", "kkday_customer", "kkday_customer_private", "klook", "gyg", "trip"]
     missing_docs = [k for k in _required if not files.get(k)]
-    klook_activities_missing = not files.get("klook_activities")
-    if klook_activities_missing and not enable_pad:
+    if not files.get("klook_activities") and not enable_pad:
         missing_docs.append("klook_activities")
 
     if missing_docs:
@@ -1027,30 +1026,6 @@ def run(
         )
         print(f"[错误] {missing_msg}")
         return 1
-
-    # 条件1：启用 PAD 且 klook_activities 文件缺失，触发专项流下载
-    if enable_pad and klook_activities_missing:
-        print("[信息] klook_activities 映射文件缺失，触发 PAD 流获取...")
-        if not _run_single_pad_flow(KLOOK_ACTIVITIES_FLOW):
-            send_lark_notification(
-                DEFAULT_LARK_WEBHOOK,
-                "PAD流执行失败",
-                f"失败/超时平台: {KLOOK_ACTIVITIES_FLOW['name']}",
-                timeout_sec=DEFAULT_TIMEOUT_SEC,
-            )
-            print(f"[错误] PAD流失败: ['{KLOOK_ACTIVITIES_FLOW['name']}']")
-            return 1
-        time.sleep(PAD_FILE_SETTLE_SEC)
-        files = discover(input_dir)
-        if not files.get("klook_activities"):
-            send_lark_notification(
-                DEFAULT_LARK_WEBHOOK,
-                "PAD流执行失败",
-                f"PAD 报成功但 klook_activities 文件仍未找到: {os.path.abspath(input_dir)}",
-                timeout_sec=DEFAULT_TIMEOUT_SEC,
-            )
-            print("[错误] PAD 流报成功但 klook_activities 文件仍未找到")
-            return 1
 
     klook_activity_map = load_klook_activity_map(input_dir)
 
@@ -1211,6 +1186,28 @@ def main() -> int:
 
     if args.pad:
         clear_input_dir(args.input_dir)
+        # klook_activities 不随 clear_input_dir 清理，文件缺失时先单独触发
+        if not discover(args.input_dir).get("klook_activities"):
+            print("[信息] klook_activities 映射文件缺失，触发 PAD 流获取...")
+            if not _run_single_pad_flow(KLOOK_ACTIVITIES_FLOW):
+                send_lark_notification(
+                    DEFAULT_LARK_WEBHOOK,
+                    "PAD流执行失败",
+                    f"失败/超时平台: {KLOOK_ACTIVITIES_FLOW['name']}",
+                    timeout_sec=DEFAULT_TIMEOUT_SEC,
+                )
+                print(f"[错误] PAD流失败: ['{KLOOK_ACTIVITIES_FLOW['name']}']")
+                return 1
+            time.sleep(PAD_FILE_SETTLE_SEC)
+            if not discover(args.input_dir).get("klook_activities"):
+                send_lark_notification(
+                    DEFAULT_LARK_WEBHOOK,
+                    "PAD流执行失败",
+                    f"PAD 报成功但 klook_activities 文件仍未找到: {os.path.abspath(args.input_dir)}",
+                    timeout_sec=DEFAULT_TIMEOUT_SEC,
+                )
+                print("[错误] PAD 流报成功但 klook_activities 文件仍未找到")
+                return 1
         ok, failed = wait_for_pad_flows()
         if not ok:
             send_lark_notification(
