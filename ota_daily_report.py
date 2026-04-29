@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import glob
 import json
 import os
@@ -47,13 +48,26 @@ KLOOK_ACTIVITIES_FLOW = {"name": "klook_activities", "flow_id": "01d20731-e238-f
 
 
 @dataclass
-class RowRecord:
+class Traveller:
+    passenger_type: str
+    id_type: str
+    english_name: str
+    chinese_name: str
+    gender: str
+
+
+@dataclass
+class OrderRecord:
     platform: str
+    platform_order_no: str
     product_pid: str
     departure_date: str
+    order_amount: float
+    currency: str
     traveller_count: int
     has_meal: bool
     lang_code: Optional[str]
+    travellers: List[Traveller]
 
 
 FEATURED_MEAL_KEYWORDS = ("特色早餐", "特色午餐", "特色晚餐", "鍋", "御膳", "特色料理", "含午餐", "宴")
@@ -108,6 +122,16 @@ def to_int(value, default: int = 0) -> int:
     text = text.replace(",", "")
     try:
         return int(float(text))
+    except ValueError:
+        return default
+
+
+def to_float(value, default: float = 0.0) -> float:
+    text = norm_text(value).replace(",", "")
+    if not text:
+        return default
+    try:
+        return float(text)
     except ValueError:
         return default
 
@@ -205,18 +229,70 @@ def find_trip_header_row(raw_df: pd.DataFrame) -> int:
     raise ValueError("Trip file header row not found")
 
 
-def build_kkday_lang_map(customer_csv: str) -> Dict[str, str]:
+def load_kkday_customer(customer_csv: str) -> pd.DataFrame:
     df = pd.read_csv(customer_csv, header=1, encoding="utf-8-sig", dtype=str)
     order_col = pick_col(df, ["訂單編號", "订单编号"])
-    lang_col = pick_col(df, ["導覽語言", "导览语言"])
+    if not order_col:
+        raise ValueError(f"kkday customer CSV 缺少订单号列（訂單編號/订单编号）: {customer_csv}")
+    df[order_col] = df[order_col].ffill()
     df = df[df[order_col].notna() & (df[order_col].str.strip() != "")]
-    df = df.drop_duplicates(subset=[order_col], keep="first")
-    return dict(zip(df[order_col].str.strip(), df[lang_col].fillna("").str.strip()))
+    return df.reset_index(drop=True)
 
 
-def parse_kkday(f: str, platform: str, order_lang: Dict[str, str] = None) -> List[RowRecord]:
-    out: List[RowRecord] = []
-    df = pd.read_csv(f)
+def _kkday_id_type(taiwan_id: str, passport: str) -> str:
+    if taiwan_id:
+        return "台湾身分证"
+    if passport:
+        return "护照"
+    return ""
+
+
+def _kkday_gender(value: str) -> str:
+    v = norm_text(value).upper()
+    return v if v in ("M", "F") else "U"
+
+
+def _build_kkday_travellers(group_rows: pd.DataFrame, adult: int, child: int, infant: int) -> List[Traveller]:
+    rows = group_rows.copy()
+    if "旅客生日" in rows.columns:
+        rows["_birth_key"] = rows["旅客生日"].fillna("")
+    else:
+        rows["_birth_key"] = ""
+    has_birth = rows["_birth_key"].str.strip() != ""
+    if has_birth.any():
+        sorted_rows = pd.concat([
+            rows[has_birth].sort_values("_birth_key"),
+            rows[~has_birth],
+        ])
+    else:
+        sorted_rows = rows
+    travellers: List[Traveller] = []
+    types = ["成人"] * adult + ["儿童"] * child + ["婴儿"] * infant
+    for i, (_, r) in enumerate(sorted_rows.iterrows()):
+        pt = types[i] if i < len(types) else "成人"
+        first_en = norm_text(r.get("旅客護照名（英文）"))
+        last_en = norm_text(r.get("旅客護照姓（英文）"))
+        english_name = (f"{last_en} {first_en}").strip() if (first_en or last_en) else ""
+        first_zh = norm_text(r.get("名"))
+        last_zh = norm_text(r.get("姓氏"))
+        chinese_name = (f"{last_zh}{first_zh}").strip()
+        taiwan_id = norm_text(r.get("台灣身分證字號"))
+        passport = norm_text(r.get("護照號碼"))
+        travellers.append(
+            Traveller(
+                passenger_type=pt,
+                id_type=_kkday_id_type(taiwan_id, passport),
+                english_name=english_name,
+                chinese_name=chinese_name,
+                gender=_kkday_gender(r.get("性別")),
+            )
+        )
+    return travellers
+
+
+def parse_kkday(f: str, platform: str, customer_df: pd.DataFrame) -> List[OrderRecord]:
+    out: List[OrderRecord] = []
+    df = pd.read_csv(f, encoding="utf-8-sig")
     pid_col = pick_col(df, ["商品編號", "商品编号"])
     date_col = pick_col(df, ["開始日期", "开始日期"])
     cnt_col = pick_col(df, ["訂購總數", "订购总数"])
@@ -224,9 +300,23 @@ def parse_kkday(f: str, platform: str, order_lang: Dict[str, str] = None) -> Lis
     pkg_col = pick_col(df, ["套餐名稱", "套餐名称"])
     product_col = pick_col(df, ["商品名稱", "商品名称"])
     order_col = pick_col(df, ["訂單編號", "订单编号"])
+    cur_col = pick_col(df, ["幣別", "币别"])
+    amount_col = pick_col(df, ["成本金額", "成本金额"])
+    adult_col = pick_col(df, ["成人"])
+    child_col = pick_col(df, ["兒童", "儿童"])
+    infant_col = pick_col(df, ["幼童"])
     spec_cols = [c for c in ["規格一", "規格二", "規格三", "规格一", "规格二", "规格三"] if c in df.columns]
     if not (pid_col and date_col and cnt_col and pkg_col):
         return out
+
+    if order_col:
+        df[order_col] = df[order_col].ffill()
+
+    cust_order_col = pick_col(customer_df, ["訂單編號", "订单编号"])
+    if not cust_order_col:
+        raise ValueError("customer_df 缺少订单号列（訂單編號/订单编号）")
+    customer_groups = customer_df.groupby(cust_order_col)
+    cust_lang_col = pick_col(customer_df, ["導覽語言", "导览语言"])
 
     for _, row in df.iterrows():
         if status_col and is_cancelled_status(row.get(status_col)):
@@ -254,18 +344,36 @@ def parse_kkday(f: str, platform: str, order_lang: Dict[str, str] = None) -> Lis
                 has_meal = any(k in product_title for k in FEATURED_MEAL_KEYWORDS)
 
         oid = norm_text(row.get(order_col))
-        if order_lang and oid not in order_lang:
-            print(f"[警告] 导览语言未匹配: 訂單編號={oid or '(空)'} pid={pid}")
-        lang_code: Optional[str] = (order_lang.get(oid) or None) if order_lang else None
+        if not oid:
+            print(f"[警告] kkday 跳过孤儿行（前文无订单号可继承）: pid={pid} dep={dep}")
+            continue
+        adult_n = to_int(row.get(adult_col)) if adult_col else 0
+        child_n = to_int(row.get(child_col)) if child_col else 0
+        infant_n = to_int(row.get(infant_col)) if infant_col else 0
+
+        lang_code: Optional[str] = None
+        travellers: List[Traveller] = []
+        if oid in customer_groups.groups:
+            sub = customer_groups.get_group(oid)
+            if cust_lang_col:
+                raw_lang = norm_text(sub.iloc[0].get(cust_lang_col))
+                lang_code = parse_lang_from_text(raw_lang, LANG_MAP) if raw_lang else None
+            travellers = _build_kkday_travellers(sub, adult_n, child_n, infant_n)
+        else:
+            print(f"[警告] 导览语言未匹配: 訂單編號={oid} pid={pid}")
 
         out.append(
-            RowRecord(
+            OrderRecord(
                 platform=platform,
+                platform_order_no=oid,
                 product_pid=pid,
                 departure_date=dep,
+                order_amount=to_float(row.get(amount_col)) if amount_col else 0.0,
+                currency=norm_text(row.get(cur_col)) if cur_col else "",
                 traveller_count=cnt,
                 has_meal=bool(has_meal),
                 lang_code=lang_code,
+                travellers=travellers,
             )
         )
     return out
@@ -310,27 +418,52 @@ def _has_klook_unknown_activities(f: str, activity_map: Dict[str, str]) -> bool:
     return False
 
 
-def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], int]:
-    out: List[RowRecord] = []
+KLOOK_TITLE_GENDER = {"mr": "M", "mister": "M", "ms": "F", "mrs": "F", "miss": "F"}
+
+
+def _klook_gender(value) -> str:
+    return KLOOK_TITLE_GENDER.get(norm_text(value).lower(), "U")
+
+
+def _klook_currency(price_col: Optional[str]) -> str:
+    if not price_col:
+        return "JPY"
+    m = re.search(r"\(([A-Za-z]+)\)", price_col)
+    return m.group(1).upper() if m else "JPY"
+
+
+def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[OrderRecord], int]:
+    out: List[OrderRecord] = []
 
     df = pd.read_excel(f)
+    order_col = pick_col(df, ["訂單編號", "订单编号"])
     date_col = pick_col(df, ["使用時間", "使用时间"])
     plan_col = pick_col(df, ["方案名稱", "方案名称"])
     activity_col = pick_col(df, ["活動名稱", "活动名称"])
     lang_col = pick_col(df, ["10010010-偏好語言", "10010010-偏好语言"])
     status_col = pick_col(df, ["訂單狀態", "订单状态"])
-    if not (date_col and plan_col and activity_col):
+    last_col = pick_col(df, ["10010002-姓氏"])
+    first_col = pick_col(df, ["10010003-名字"])
+    title_col = pick_col(df, ["10010004-稱謂"])
+    price_col = next((c for c in df.columns if str(c).startswith("單價")), None)
+    if not (order_col and date_col and plan_col and activity_col):
         raise ValueError(
-            f"Klook order columns mismatch in {f}, required: 使用時間, 方案名稱, 活動名稱"
+            f"Klook order columns mismatch in {f}, required: 訂單編號, 使用時間, 方案名稱, 活動名稱"
         )
 
+    currency = _klook_currency(price_col)
     missing_mapping_count = 0
-    for _, row in df.iterrows():
-        if status_col and is_cancelled_status(row.get(status_col)):
+
+    for oid, group in df.groupby(order_col, sort=False):
+        oid_text = norm_text(oid)
+        if not oid_text:
             continue
-        dep = extract_date_yyyy_mm_dd(row.get(date_col))
-        plan_name = norm_text(row.get(plan_col))
-        activity_name_raw = norm_text(row.get(activity_col))
+        if status_col and is_cancelled_status(group.iloc[0].get(status_col)):
+            continue
+        head = group.iloc[0]
+        dep = extract_date_yyyy_mm_dd(head.get(date_col))
+        plan_name = norm_text(head.get(plan_col))
+        activity_name_raw = norm_text(head.get(activity_col))
         if not dep or not activity_name_raw:
             continue
         pid = activity_map.get(activity_name_raw.lower())
@@ -346,16 +479,38 @@ def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], 
         else:
             has_meal = any(k in activity_name_raw for k in FEATURED_MEAL_KEYWORDS)
 
-        lang_code = parse_lang_from_text(norm_text(row.get(lang_col)), LANG_MAP) if lang_col else None
+        lang_code = parse_lang_from_text(norm_text(head.get(lang_col)), LANG_MAP) if lang_col else None
+
+        order_amount = group[price_col].apply(to_float).sum() if price_col else 0.0
+
+        travellers: List[Traveller] = []
+        for _, r in group.iterrows():
+            last = norm_text(r.get(last_col)) if last_col else ""
+            first = norm_text(r.get(first_col)) if first_col else ""
+            if not (last or first):
+                continue
+            travellers.append(
+                Traveller(
+                    passenger_type="成人",
+                    id_type="",
+                    english_name=(f"{last} {first}").strip(),
+                    chinese_name="",
+                    gender=_klook_gender(r.get(title_col)) if title_col else "U",
+                )
+            )
 
         out.append(
-            RowRecord(
+            OrderRecord(
                 platform="klook",
+                platform_order_no=oid_text,
                 product_pid=pid,
                 departure_date=dep,
-                traveller_count=1,
+                order_amount=order_amount,
+                currency=currency,
+                traveller_count=len(group),
                 has_meal=bool(has_meal),
                 lang_code=lang_code,
+                travellers=travellers,
             )
         )
     if missing_mapping_count > 0:
@@ -366,8 +521,29 @@ def parse_klook(f: str, activity_map: Dict[str, str]) -> Tuple[List[RowRecord], 
 TRIP_BCP47_LANG_CODES = {"en", "ja", "ko", "th", "vi"}
 
 
-def parse_trip(f: str) -> List[RowRecord]:
-    out: List[RowRecord] = []
+def _parse_trip_traveller(text: str) -> Optional[Traveller]:
+    if not text:
+        return None
+    name = norm_text(text.split(",", 1)[0])
+    if not name:
+        return None
+    if "/" in name:
+        english_name = name.replace("/", " ").strip()
+        chinese_name = ""
+    else:
+        english_name = ""
+        chinese_name = name
+    return Traveller(
+        passenger_type="成人",
+        id_type="",
+        english_name=english_name,
+        chinese_name=chinese_name,
+        gender="U",
+    )
+
+
+def parse_trip(f: str) -> List[OrderRecord]:
+    out: List[OrderRecord] = []
 
     raw = pd.read_excel(f, sheet_name="待辦事項", header=None)
     header_row = find_trip_header_row(raw)
@@ -381,8 +557,15 @@ def parse_trip(f: str) -> List[RowRecord]:
     plan_col = pick_col(df, ["套餐名稱", "套餐名称"])
     lang_col = pick_col(df, ["訂單語言", "订单语言"])
     status_col = pick_col(df, ["訂單狀態", "订单状态"])
+    order_col = pick_col(df, ["訂單編號", "订单编号"])
+    amount_col = pick_col(df, ["售價總額", "售价总额"])
+    cur_col = pick_col(df, ["售價貨幣", "售价货币"])
+    pax_col = pick_col(df, ["旅客資料", "旅客资料"])
     if not (pid_col and date_col and cnt_col and plan_col):
         return out
+
+    if order_col:
+        df[order_col] = df[order_col].ffill()
 
     for _, row in df.iterrows():
         if status_col and is_cancelled_status(row.get(status_col)):
@@ -392,6 +575,10 @@ def parse_trip(f: str) -> List[RowRecord]:
         cnt = to_int(row.get(cnt_col))
         plan = norm_text(row.get(plan_col))
         if not pid or not dep or cnt <= 0:
+            continue
+        oid = norm_text(row.get(order_col)) if order_col else ""
+        if not oid:
+            print(f"[警告] trip 跳过孤儿行（前文无订单号可继承）: pid={pid} dep={dep}")
             continue
 
         has_meal = title_meal_signal(
@@ -403,21 +590,55 @@ def parse_trip(f: str) -> List[RowRecord]:
         prefix = norm_text(row.get(lang_col)).split("-", 1)[0].lower() if lang_col else ""
         lang_code = prefix if prefix in TRIP_BCP47_LANG_CODES else None
 
+        traveller = _parse_trip_traveller(norm_text(row.get(pax_col)) if pax_col else "")
+        try:
+            amount = float(row.get(amount_col)) if amount_col and pd.notna(row.get(amount_col)) else 0.0
+        except (TypeError, ValueError):
+            amount = 0.0
+
         out.append(
-            RowRecord(
+            OrderRecord(
                 platform="trip",
+                platform_order_no=oid,
                 product_pid=pid,
                 departure_date=dep,
+                order_amount=amount,
+                currency=norm_text(row.get(cur_col)) if cur_col else "",
                 traveller_count=cnt,
                 has_meal=bool(has_meal),
                 lang_code=lang_code,
+                travellers=[traveller] if traveller else [],
             )
         )
     return out
 
 
-def parse_gyg(f: str) -> List[RowRecord]:
-    out: List[RowRecord] = []
+def _parse_gyg_price(value) -> Tuple[float, str]:
+    text = norm_text(value)
+    if not text:
+        return 0.0, "JPY"
+    # 支持两种格式："15000 JPY" 和 "JPY 15000"
+    m_prefix = re.match(r"([A-Za-z]{2,4})\s*([\d,.]+)", text)
+    m_suffix = re.match(r"([\d,.]+)\s*([A-Za-z]{2,4})?", text)
+    if m_prefix:
+        try:
+            amount = float(m_prefix.group(2).replace(",", ""))
+        except ValueError:
+            amount = 0.0
+        currency = m_prefix.group(1).upper()
+    elif m_suffix:
+        try:
+            amount = float(m_suffix.group(1).replace(",", ""))
+        except ValueError:
+            amount = 0.0
+        currency = (m_suffix.group(2) or "JPY").upper()
+    else:
+        return 0.0, "JPY"
+    return amount, currency
+
+
+def parse_gyg(f: str) -> List[OrderRecord]:
+    out: List[OrderRecord] = []
     lang_map = {
         "english": "en",
         "japanese": "ja",
@@ -432,6 +653,10 @@ def parse_gyg(f: str) -> List[RowRecord]:
     product_col = pick_col(df, ["Product"])
     option_col = pick_col(df, ["Option"])
     lang_col = pick_col(df, ["Language"])
+    order_col = pick_col(df, ["Booking Ref No."])
+    price_col = pick_col(df, ["Price"])
+    first_col = pick_col(df, ["Traveller's First Name"])
+    last_col = pick_col(df, ["Traveller's Surname"])
     if not (date_col and product_col and option_col and lang_col):
         return out
 
@@ -453,6 +678,12 @@ def parse_gyg(f: str) -> List[RowRecord]:
         if c in df.columns
     ]
 
+    if not count_cols:
+        print(f"[警告] GYG 文件未找到旅客人数列（Adult/Child 等），所有行将被跳过: {os.path.basename(f)}")
+
+    if order_col:
+        df[order_col] = df[order_col].ffill()
+
     for _, row in df.iterrows():
         dep = extract_date_yyyy_mm_dd(row.get(date_col))
         product = norm_text(row.get(product_col))
@@ -467,6 +698,11 @@ def parse_gyg(f: str) -> List[RowRecord]:
         if cnt <= 0:
             continue
 
+        oid = norm_text(row.get(order_col)) if order_col else ""
+        if not oid:
+            print(f"[警告] gyg 跳过孤儿行（前文无订单号可继承）: pid={pid} dep={dep}")
+            continue
+
         has_meal = any(t in option.lower() for t in meal_tokens)
         lang_text = norm_text(row.get(lang_col)).lower()
         lang_code = None
@@ -475,52 +711,102 @@ def parse_gyg(f: str) -> List[RowRecord]:
                 lang_code = v
                 break
 
+        amount, currency = _parse_gyg_price(row.get(price_col)) if price_col else (0.0, "JPY")
+
+        first = norm_text(row.get(first_col)) if first_col else ""
+        last = norm_text(row.get(last_col)) if last_col else ""
+        travellers: List[Traveller] = []
+        if first or last:
+            travellers.append(
+                Traveller(
+                    passenger_type="成人",
+                    id_type="",
+                    english_name=(f"{last} {first}").strip(),
+                    chinese_name="",
+                    gender="U",
+                )
+            )
+
         out.append(
-            RowRecord(
+            OrderRecord(
                 platform="gyg",
+                platform_order_no=oid,
                 product_pid=pid,
                 departure_date=dep,
+                order_amount=amount,
+                currency=currency,
                 traveller_count=cnt,
                 has_meal=has_meal,
                 lang_code=lang_code,
+                travellers=travellers,
             )
         )
     return out
 
 
-def aggregate(rows: Iterable[RowRecord]) -> List[Dict[str, object]]:
-    acc: Dict[Tuple[str, str, str], Dict[str, object]] = {}
-    for r in rows:
-        key = (r.platform, r.product_pid, r.departure_date)
-        if key not in acc:
-            acc[key] = {
-                "platform": r.platform,
-                "product_pid": r.product_pid,
-                "departure_date": r.departure_date,
-                "traveller_count": 0,
-                "has_meal_count": 0,
-                "guide_en_count": 0,
-                "guide_ja_count": 0,
-                "guide_ko_count": 0,
-                "guide_th_count": 0,
-                "guide_vi_count": 0,
+EXCEL_COLUMNS = [
+    "platform",
+    "platform_order_no",
+    "product_pid",
+    "departure_date",
+    "order_amount",
+    "currency",
+    "traveller_count",
+    "has_meal",
+    "lang_code",
+]
+
+
+def order_to_payload(order: OrderRecord) -> Dict[str, object]:
+    return {
+        "platform": order.platform,
+        "platform_order_no": order.platform_order_no,
+        "product_pid": order.product_pid,
+        "departure_date": order.departure_date,
+        "order_amount": order.order_amount,
+        "currency": order.currency,
+        "traveller_count": order.traveller_count,
+        "has_meal": order.has_meal,
+        "lang_code": order.lang_code,
+        "travellers": [
+            {
+                "passenger_type": t.passenger_type,
+                "id_type": t.id_type,
+                "english_name": t.english_name,
+                "chinese_name": t.chinese_name,
+                "gender": t.gender,
             }
-        payload = acc[key]
-        payload["traveller_count"] += r.traveller_count
-        if r.has_meal:
-            payload["has_meal_count"] += r.traveller_count
-        if r.lang_code in {"en", "ja", "ko", "th", "vi"}:
-            payload[f"guide_{r.lang_code}_count"] += r.traveller_count
-    return list(acc.values())
+            for t in order.travellers
+        ],
+    }
 
 
-def persist_items_to_excel(output_excel: str, payloads: List[Dict[str, object]]) -> None:
-    df = pd.DataFrame(payloads)
+def persist_orders_to_excel(output_excel: str, orders: List[OrderRecord]) -> None:
+    rows = [
+        {col: getattr(o, col) for col in EXCEL_COLUMNS}
+        for o in orders
+    ]
+    df = pd.DataFrame(rows, columns=EXCEL_COLUMNS)
     df.to_excel(output_excel, index=False)
 
 
-def post_payload_batch(endpoint: str, items: List[Dict[str, object]], timeout_sec: float, reset: bool = False) -> Tuple[bool, str]:
-    payload: Dict[str, object] = {"items": items}
+def _interpret_pim_response(http_code: int, body: str) -> Tuple[bool, str]:
+    """PIM 后端约定错误也返回 HTTP 200，需解析 body.code 才能判定成败。"""
+    if not (200 <= http_code < 300):
+        return False, f"HTTP {http_code}: {body[:800]}"
+    try:
+        parsed = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        return False, f"HTTP {http_code} non-JSON body: {body[:800]}"
+    api_code = parsed.get("code")
+    if api_code in (0, None, "0"):
+        return True, f"HTTP {http_code}"
+    msg = parsed.get("message") or parsed.get("errors") or body[:800]
+    return False, f"HTTP {http_code} api_code={api_code}: {msg}"
+
+
+def post_payload_batch(endpoint: str, orders: List[Dict[str, object]], timeout_sec: float, reset: bool = False) -> Tuple[bool, str]:
+    payload: Dict[str, object] = {"orders": orders}
     if reset:
         payload["reset"] = True
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -533,13 +819,11 @@ def post_payload_batch(endpoint: str, items: List[Dict[str, object]], timeout_se
     try:
         with request.urlopen(req, timeout=timeout_sec) as resp:
             code = resp.getcode()
-            body = resp.read(400).decode("utf-8", errors="ignore")
-            if 200 <= code < 300:
-                return True, f"HTTP {code}"
-            return False, f"HTTP {code}: {body}"
+            body = resp.read().decode("utf-8", errors="ignore")
+            return _interpret_pim_response(code, body)
     except error.HTTPError as e:
-        body = e.read(400).decode("utf-8", errors="ignore")
-        return False, f"HTTPError {e.code}: {body}"
+        body = e.read().decode("utf-8", errors="ignore")
+        return False, f"HTTPError {e.code}: {body[:800]}"
     except Exception as e:  # noqa: BLE001
         return False, f"{type(e).__name__}: {e}"
 
@@ -668,16 +952,19 @@ def make_archive_dir(input_dir: str) -> str:
     base = datetime.now().strftime("%Y%m%d")
     archive_root = os.path.join(input_dir, "archived")
     candidate = os.path.join(archive_root, base)
-    if not os.path.exists(candidate):
+    try:
         os.makedirs(candidate)
         return candidate
+    except FileExistsError:
+        pass
     suffix = 1
     while True:
         candidate = os.path.join(archive_root, f"{base}({suffix})")
-        if not os.path.exists(candidate):
+        try:
             os.makedirs(candidate)
             return candidate
-        suffix += 1
+        except FileExistsError:
+            suffix += 1
 
 
 def clear_input_dir(input_dir: str) -> None:
@@ -756,11 +1043,11 @@ def run(
 
     klook_activity_map = load_klook_activity_map(input_dir)
 
-    rows: List[RowRecord] = []
-    kkday_lang = build_kkday_lang_map(files["kkday_customer"])
-    kkday_private_lang = build_kkday_lang_map(files["kkday_customer_private"])
-    rows.extend(parse_kkday(files["kkday"], platform="kkday", order_lang=kkday_lang))
-    rows.extend(parse_kkday(files["kkday_private"], platform="kkday_private", order_lang=kkday_private_lang))
+    orders: List[OrderRecord] = []
+    kkday_customer = load_kkday_customer(files["kkday_customer"])
+    kkday_customer_private = load_kkday_customer(files["kkday_customer_private"])
+    orders.extend(parse_kkday(files["kkday"], platform="kkday", customer_df=kkday_customer))
+    orders.extend(parse_kkday(files["kkday_private"], platform="kkday_private", customer_df=kkday_customer_private))
     # 条件2：预检有未映射活动，先刷新映射再解析
     if enable_pad and _has_klook_unknown_activities(files["klook"], klook_activity_map):
         print("[信息] klook 存在未映射活动，触发 PAD 流刷新映射...")
@@ -768,23 +1055,22 @@ def run(
             klook_activity_map = load_klook_activity_map(input_dir)
         else:
             print("[警告] klook_activities PAD 流执行失败，继续使用现有映射")
-    klook_rows, _ = parse_klook(files["klook"], klook_activity_map)
-    rows.extend(klook_rows)
-    rows.extend(parse_gyg(files["gyg"]))
-    rows.extend(parse_trip(files["trip"]))
+    klook_orders, _ = parse_klook(files["klook"], klook_activity_map)
+    orders.extend(klook_orders)
+    orders.extend(parse_gyg(files["gyg"]))
+    orders.extend(parse_trip(files["trip"]))
 
-    payloads = aggregate(rows)
-    payloads.sort(key=lambda x: (x["platform"], x["product_pid"], x["departure_date"]))
-    persist_items_to_excel(output_excel, payloads)
+    orders.sort(key=lambda o: (o.platform, o.product_pid, o.departure_date, o.platform_order_no))
+    persist_orders_to_excel(output_excel, orders)
+    payloads = [order_to_payload(o) for o in orders]
     output_abs_path = os.path.abspath(output_excel)
 
     if verbose:
         by_platform = defaultdict(int)
-        for p in payloads:
-            by_platform[p["platform"]] += 1
+        for o in orders:
+            by_platform[o.platform] += 1
         print(f"[信息] 文件统计: { {k: (1 if v else 0) for k, v in files.items()} }")
-        print(f"[信息] 标准化记录数: {len(rows)}")
-        print(f"[信息] 聚合条目数: {len(payloads)}")
+        print(f"[信息] 订单条目数: {len(orders)}")
         print(f"[信息] 各平台条目: {dict(by_platform)}")
         print(f"[信息] 已写入 Excel: {output_abs_path}")
 
@@ -820,7 +1106,7 @@ def run(
                 ),
                 timeout_sec=DEFAULT_TIMEOUT_SEC,
             )
-        if failed_count == 0:
+        if failed_count == 0 and enable_pad:
             archive_dir = archive_source_files(input_dir, files)
             print(f"[信息] 源文件已归档至: {archive_dir}")
         print(f"[结果] 已写入={len(payloads)} 已发送={ok_count} 失败={failed_count}")
@@ -838,24 +1124,27 @@ def run(
         f"（耗时 {elapsed_min} 分 {elapsed_sec} 秒）"
         if start_time else f"{end_time.strftime('%H:%M')}"
     )
-    platform_counts = Counter(r.platform for r in rows)
+    platform_counts = Counter(o.platform for o in orders)
     rows_by_platform = (
-        f"kkday={platform_counts['kkday']}(订{len(kkday_lang)}) "
-        f"kkday专属团={platform_counts['kkday_private']}(订{len(kkday_private_lang)}) "
+        f"kkday=报表{platform_counts['kkday']}(订单{len(kkday_customer)}) "
+        f"kkday专属团=报表{platform_counts['kkday_private']}(订单{len(kkday_customer_private)}) "
         f"klook={platform_counts['klook']} "
         f"gyg={platform_counts['gyg']} "
         f"trip={platform_counts['trip']}"
     )
     today = end_time.date()
     m3 = today.month + 3
-    end_3m = today.replace(year=today.year + (m3 - 1) // 12, month=(m3 - 1) % 12 + 1)
+    year_3m = today.year + (m3 - 1) // 12
+    month_3m = (m3 - 1) % 12 + 1
+    day_3m = min(today.day, calendar.monthrange(year_3m, month_3m)[1])
+    end_3m = today.replace(year=year_3m, month=month_3m, day=day_3m)
     date_range_str = f"{today.year}/{today.month}/{today.day} ~ {end_3m.year}/{end_3m.month}/{end_3m.day}"
     send_lark_notification(
         DEFAULT_LARK_WEBHOOK if silent else SUCCESS_LARK_WEBHOOK,
         "处理完成",
         (
             f"订单记录: {rows_by_platform}\n"
-            f"聚合条目: {len(payloads)}\n"
+            f"订单条目: {len(orders)}\n"
             f"统计时长: {date_range_str}\n"
             f"运行时间: {time_str}\n"
             f"查看结果: https://dev-pim.liontravel.global/zh-TW/ota/daily-sum"
@@ -868,7 +1157,7 @@ def run(
 def main() -> int:
     parser = argparse.ArgumentParser(description="OTA daily summary aggregator and reporter")
     parser.add_argument("-i", "--input-dir", default=os.path.join(os.path.expanduser("~"), "Downloads"), help="input directory for OTA exports")
-    parser.add_argument("--no-dev", action="store_true", default=False, help=f"use prod endpoint instead of dev: {DEFAULT_POST_TARGET}")
+    parser.add_argument("--local", action="store_true", default=False, help=f"use local endpoint instead of dev: {DEFAULT_POST_TARGET}")
     parser.add_argument("-o", "--output-excel", default=None, help="output excel file path (default: ota_daily_summary_YYYYMMDD_HHMMSS.xlsx in cwd)")
     parser.add_argument(
         "--no-post",
@@ -883,12 +1172,15 @@ def main() -> int:
     parser.add_argument("--silent", action="store_true", default=False, help="send success notification to default webhook instead of success webhook")
     args = parser.parse_args()
 
-    endpoint = DEFAULT_POST_TARGET if args.no_dev else DEV_POST_TARGET
+    endpoint = DEFAULT_POST_TARGET if args.local else DEV_POST_TARGET
 
-    output_excel = args.output_excel or os.path.join(
-        r"C:\RPA",
-        f"ota_daily_summary_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx",
-    )
+    default_basename = f"ota_daily_summary_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+    output_excel = args.output_excel or os.path.join(r"C:\RPA", default_basename)
+    if os.path.isdir(output_excel):
+        output_excel = os.path.join(output_excel, default_basename)
+    elif not output_excel.lower().endswith(".xlsx"):
+        output_excel += ".xlsx"
+    os.makedirs(os.path.dirname(os.path.abspath(output_excel)), exist_ok=True)
 
     start_time = datetime.now()
 
