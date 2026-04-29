@@ -921,8 +921,6 @@ def _run_single_pad_flow(flow: dict) -> bool:
 
 
 def wait_for_pad_flows() -> Tuple[bool, List[str]]:
-    shutil.rmtree(PAD_SIGNAL_DIR, ignore_errors=True)
-    os.makedirs(PAD_SIGNAL_DIR)
     for f in PAD_FLOWS:
         if not _run_single_pad_flow(f):
             return False, [f["name"]]
@@ -1186,6 +1184,8 @@ def main() -> int:
 
     if args.pad:
         clear_input_dir(args.input_dir)
+        shutil.rmtree(PAD_SIGNAL_DIR, ignore_errors=True)
+        os.makedirs(PAD_SIGNAL_DIR)
         # klook_activities 不随 clear_input_dir 清理，文件缺失时先单独触发
         if not discover(args.input_dir).get("klook_activities"):
             print("[信息] klook_activities 映射文件缺失，触发 PAD 流获取...")
