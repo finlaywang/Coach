@@ -1028,6 +1028,30 @@ def run(
         print(f"[错误] {missing_msg}")
         return 1
 
+    # 条件1：启用 PAD 且 klook_activities 文件缺失，触发专项流下载
+    if enable_pad and klook_activities_missing:
+        print("[信息] klook_activities 映射文件缺失，触发 PAD 流获取...")
+        if not _run_single_pad_flow(KLOOK_ACTIVITIES_FLOW):
+            send_lark_notification(
+                DEFAULT_LARK_WEBHOOK,
+                "PAD流执行失败",
+                f"失败/超时平台: {KLOOK_ACTIVITIES_FLOW['name']}",
+                timeout_sec=DEFAULT_TIMEOUT_SEC,
+            )
+            print(f"[错误] PAD流失败: ['{KLOOK_ACTIVITIES_FLOW['name']}']")
+            return 1
+        time.sleep(PAD_FILE_SETTLE_SEC)
+        files = discover(input_dir)
+        if not files.get("klook_activities"):
+            send_lark_notification(
+                DEFAULT_LARK_WEBHOOK,
+                "PAD流执行失败",
+                f"PAD 报成功但 klook_activities 文件仍未找到: {os.path.abspath(input_dir)}",
+                timeout_sec=DEFAULT_TIMEOUT_SEC,
+            )
+            print("[错误] PAD 流报成功但 klook_activities 文件仍未找到")
+            return 1
+
     klook_activity_map = load_klook_activity_map(input_dir)
 
     orders: List[OrderRecord] = []
@@ -1187,28 +1211,6 @@ def main() -> int:
 
     if args.pad:
         clear_input_dir(args.input_dir)
-        if not resolve_klook_activity_file(args.input_dir):
-            url = (
-                f"ms-powerautomate://console/flow/run"
-                f"?environmentid={PAD_ENV_ID}&workflowid={KLOOK_ACTIVITIES_FLOW['flow_id']}&source=Other"
-            )
-            os.startfile(url)
-            print(f"[触发] {KLOOK_ACTIVITIES_FLOW['name']}")
-            start_ka = time.time()
-            while time.time() - start_ka < PAD_TIMEOUT_SEC:
-                if resolve_klook_activity_file(args.input_dir):
-                    print(f"[完成] {KLOOK_ACTIVITIES_FLOW['name']}")
-                    break
-                time.sleep(PAD_POLL_INTERVAL)
-            else:
-                send_lark_notification(
-                    DEFAULT_LARK_WEBHOOK,
-                    "PAD流执行失败",
-                    f"klook_activities 文件获取超时: {os.path.abspath(args.input_dir)}",
-                    timeout_sec=DEFAULT_TIMEOUT_SEC,
-                )
-                print("[错误] klook_activities 文件获取超时")
-                return 1
         ok, failed = wait_for_pad_flows()
         if not ok:
             send_lark_notification(
